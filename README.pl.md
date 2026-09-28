@@ -2,7 +2,7 @@
 
 > SkillSync to desktopowy menedżer skills AI: wykrywa prawidłowe manifesty, porównuje wersje z upstreamem i wykonuje aktualizację z kopią zapasową oraz rollbackiem. Jeśli szukasz odpowiedzi na pytanie „jak zaktualizować skills w Claude Code, Codexie lub Gemini”, zacznij od **Aktualizacje**, sprawdź changelog i uruchom aktualizację wybranego skilla.
 
-> **v1.4.1:** cache pluginów Codex jest filtrowany według oficjalnego rejestru,
+> **v1.4.2:** cache pluginów Codex jest filtrowany według oficjalnego rejestru,
 > aktywne pluginy aktualizują się przez Codex CLI, a historyczne katalogi i
 > duplikaty nie zawyżają liczby zasobów. Wykrywane są także zagnieżdżone marketplace Claude, takie jak
 > Lex-Machina, zarejestrowane marketplace aktualizują się przez oficjalny CLI,

@@ -63,6 +63,18 @@ impl CodexPluginService {
         Self::installation_for_path_from(path, &Self::list_installations())
     }
 
+    /// Same ownership check as [`installation_for_path`], but reuses a
+    /// registry snapshot captured by the caller. Discovery walks hundreds of
+    /// directories; invoking the Codex CLI for every directory made a scan
+    /// slow and, more importantly, allowed the registry to change halfway
+    /// through one result set.
+    pub fn installation_for_path_from_snapshot(
+        path: &Path,
+        installations: &[CodexPluginInstallation],
+    ) -> Option<CodexPluginInstallation> {
+        Self::installation_for_path_from(path, installations)
+    }
+
     pub fn is_legacy_cache_path(path: &Path) -> bool {
         dirs::home_dir()
             .map(|home| path.starts_with(home.join(".codex/plugins/cache")))
@@ -73,6 +85,16 @@ impl CodexPluginService {
     /// plugin installations. They are excluded from discovery unless the
     /// current Codex registry explicitly points at the same path.
     pub fn is_inactive_cache_path(path: &Path) -> bool {
+        Self::is_inactive_cache_path_from(path, &Self::list_installations())
+    }
+
+    /// Registry-snapshot variant used by discovery. A Codex cache path is
+    /// active only when the authoritative registry points at that exact
+    /// installation. Missing/invalid registry data therefore fails closed.
+    pub fn is_inactive_cache_path_from(
+        path: &Path,
+        installations: &[CodexPluginInstallation],
+    ) -> bool {
         let Some(home) = dirs::home_dir() else {
             return false;
         };
@@ -83,9 +105,34 @@ impl CodexPluginService {
         if !canonical.starts_with(&cache_root) {
             return false;
         }
-        Self::list_installations()
-            .iter()
-            .all(|installation| !canonical.starts_with(&installation.install_path))
+        installations.iter().all(|installation| {
+            fs::canonicalize(&installation.install_path)
+                .ok()
+                .is_none_or(|root| !canonical.starts_with(root))
+        })
+    }
+
+    /// Active Codex plugin caches are owned by Codex and must never be
+    /// discovered through the generic Skill scanner. Otherwise a plugin that
+    /// contains `SKILL.md` entries appears twice and its update is incorrectly
+    /// routed to the Git/non-Git Skill path.
+    pub fn is_active_plugin_cache_path_from(
+        path: &Path,
+        installations: &[CodexPluginInstallation],
+    ) -> bool {
+        let Some(home) = dirs::home_dir() else {
+            return false;
+        };
+        let cache_root = home.join(".codex/plugins/cache");
+        let Ok(canonical) = fs::canonicalize(path) else {
+            return false;
+        };
+        canonical.starts_with(&cache_root)
+            && installations.iter().any(|installation| {
+                fs::canonicalize(&installation.install_path)
+                    .ok()
+                    .is_some_and(|root| canonical.starts_with(root))
+            })
     }
 
     /// The Codex marketplace checkout contains every catalog entry, while

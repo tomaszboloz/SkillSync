@@ -2,6 +2,23 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [1.4.2] - 2026-09-28
+
+### Fixed
+
+- Exclude inactive and active Codex cache snapshots from the generic Skill
+  detector. Codex-owned plugins are represented once by the authoritative
+  plugin registry and cannot be routed to a Git update accidentally.
+- Read the Codex plugin registry once per relevant scan, avoiding repeated CLI
+  calls and mixed registry states.
+- Migrate persisted monitored paths by removing obsolete
+  `~/.codex/plugins/cache/**` Skill entries and canonical-path duplicates.
+
+### Verification
+
+- Resource accounting reports logical resources separately from physical
+  installations, so shared locations do not inflate the total.
+
 ## [1.4.1] - 2026-09-28
 
 ### Added
@@ -208,4 +225,5 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 [1.3.0]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.3.0
 [1.4.0]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.0
 [1.4.1]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.1
+[1.4.2]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.2
 [1.3.1]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.3.1

@@ -17,6 +17,18 @@ impl SkillDetector {
     pub fn scan_directories(paths: &[PathBuf]) -> Vec<SkillMetadata> {
         let mut skills_map: std::collections::HashMap<String, SkillMetadata> =
             std::collections::HashMap::new();
+        // Capture Codex ownership once for the whole scan. Legacy cache
+        // directories are not Git skills; active caches are represented by
+        // the plugin detector and must not be scanned a second time here.
+        let codex_root = dirs::home_dir().map(|home| home.join(".codex"));
+        let codex_installations = if codex_root
+            .as_ref()
+            .is_some_and(|root| paths.iter().any(|path| path.starts_with(root)))
+        {
+            CodexPluginService::active_installations()
+        } else {
+            Vec::new()
+        };
 
         for base_path in paths {
             if !base_path.exists() {
@@ -26,7 +38,12 @@ impl SkillDetector {
             // `~/.codex/plugins/cache`. The active plugin owner is the Codex
             // registry/CLI; a cache snapshot without an active registry entry
             // must not become a second install or an update target.
-            if CodexPluginService::is_inactive_cache_path(base_path) {
+            if CodexPluginService::is_inactive_cache_path_from(base_path, &codex_installations)
+                || CodexPluginService::is_active_plugin_cache_path_from(
+                    base_path,
+                    &codex_installations,
+                )
+            {
                 continue;
             }
 
@@ -52,7 +69,12 @@ impl SkillDetector {
                 }
                 let p = entry.path();
                 if entry.file_type().is_dir() {
-                    if CodexPluginService::is_inactive_cache_path(p) {
+                    if CodexPluginService::is_inactive_cache_path_from(p, &codex_installations)
+                        || CodexPluginService::is_active_plugin_cache_path_from(
+                            p,
+                            &codex_installations,
+                        )
+                    {
                         entries.skip_current_dir();
                         continue;
                     }

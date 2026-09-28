@@ -104,3 +104,7 @@ upstreamu ani nie zastępuje testów środowiskowych na macOS i Windows.
 | GAP-073 | Katalog marketplace zawierał niezainstalowane pluginy liczone jako zasoby | RESOLVED | filtr aktywnych ścieżek z `codex plugin list --available --json` |
 | GAP-074 | Symlink/canonical path mógł zawyżać liczbę lokalizacji | RESOLVED | deduplikacja canonical path w detectorach |
 | GAP-075 | Brakowało rozdzielenia identycznej nazwy od identycznego źródła | RESOLVED | klucz discovery `name/id + normalized source`, testy różnych repozytoriów |
+| GAP-076 | Aktywny Codex cache z `SKILL.md` był dublowany przez ogólny skaner | RESOLVED | filtr właściciela Codex przed detekcją Skill, testy Rust |
+| GAP-077 | Rejestr Codex był odczytywany wielokrotnie podczas jednego skanu | RESOLVED | snapshot rejestru ograniczony do monitorowanego drzewa |
+| GAP-078 | Stare ścieżki hash-cache pozostawały w konfiguracji po migracji | RESOLVED | sanitizacja konfiguracji przy odczycie i zapisie |
+| GAP-079 | Licznik zasobów mieszał zasoby logiczne z lokalizacjami fizycznymi | RESOLVED | deduplikacja ścieżki kanonicznej i jawny raport lokalizacji |

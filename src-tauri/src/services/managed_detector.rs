@@ -50,11 +50,7 @@ impl ManagedItemDetector {
                     continue;
                 }
                 let path = entry.path();
-                if CodexPluginService::is_legacy_cache_path(path) {
-                    entries.skip_current_dir();
-                    continue;
-                }
-                if CodexPluginService::is_inactive_cache_path(path) {
+                if CodexPluginService::is_inactive_cache_path_from(path, &codex_installations) {
                     entries.skip_current_dir();
                     continue;
                 }
