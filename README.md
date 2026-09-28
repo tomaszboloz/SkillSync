@@ -2,13 +2,19 @@
 
 > SkillSync is a desktop **skill management tool** that helps you **update skills**, track versions, and safely sync prompt skills across AI agent projects.
 
-> **v1.4.3:** Codex-owned plugin caches are filtered by the official registry,
+> **v1.4.4:** Codex-owned plugin caches are filtered by the official registry,
 > active Codex plugins update through the Codex CLI, and duplicate cache/catalog
 > entries no longer inflate the resource count. Identical local manifests shared
 > across agent directories are now grouped as one logical resource. Nested Claude marketplaces such as Lex-Machina are discovered,
 > registered marketplace updates use the official Claude Code CLI, and
 > same-named resources from different repositories stay isolated. See the
 > evidence-backed [GAP register](docs/GAP_REGISTER.md).
+
+> **Resource accounting:** the main list contains only actionable update
+> targets with a verified upstream source. A Git repository with many
+> nested `SKILL.md` files counts once; additional copies are shown as
+> physical locations on that card. Local manifests without an update source
+> are intentionally excluded from the actionable total.
 
 > If SkillSync saves you time, please give the project a GitHub star ⭐ and share it on social media. It helps other Claude Code, Codex, Cursor, and Gemini users find a safer way to update skills.
 
@@ -36,7 +42,7 @@ _The settings screen uses anonymized paths. Add, enable, or remove monitored loc
 
 ## 1. What You Get
 
-SkillSync is an open-source, cross-platform desktop application powered by **Tauri v2**, **Rust**, **React 18**, and **Tailwind CSS**. It gives teams and individual builders one place to manage prompt skills, MCP integrations, and agent plugins, compare installed versions with upstream releases, and recover quickly if an update is not right for a project.
+SkillSync is an open-source, cross-platform desktop application powered by **Tauri v2**, **Rust**, **React 19**, and **Tailwind CSS**. It gives teams and individual builders one place to manage prompt skills, MCP integrations, and agent plugins, compare installed versions with upstream releases, and recover quickly if an update is not right for a project.
 
 - **Zero-Configuration Multi-Agent Discovery:** Automatically scans standard agent tool directories:
   - Claude Code: `~/.claude/skills`

@@ -177,53 +177,11 @@ impl GitHubService {
             }
         }
 
-        // 4. Fallback to API if available / configured
-        let release_url = format!(
-            "https://api.github.com/repos/{}/{}/releases/latest",
-            owner, repo
-        );
-        let mut req = client
-            .get(&release_url)
-            .header("User-Agent", "SkillSync-App")
-            .header("Accept", "application/vnd.github.v3+json");
-
-        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-            req = req.header("Authorization", format!("Bearer {}", token));
-        }
-
-        if let Ok(resp) = req.send().await {
-            had_usable_response |=
-                resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND;
-            if resp.status().is_success() {
-                if let Ok(release) = resp.json::<serde_json::Value>().await {
-                    let tag = release
-                        .get("tag_name")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = release
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .map(|s| s.to_string());
-                    let body = release
-                        .get("body")
-                        .and_then(|b| b.as_str())
-                        .map(|s| s.to_string());
-                    let published = release
-                        .get("published_at")
-                        .and_then(|p| p.as_str())
-                        .map(|s| s.to_string());
-
-                    if !tag.is_empty() {
-                        return Ok(Some(GitHubReleaseInfo {
-                            tag_name: tag,
-                            name,
-                            body,
-                            published_at: published,
-                        }));
-                    }
-                }
-            }
+        let (api_usable, api_release) =
+            Self::check_latest_version_api(&client, &owner, &repo).await;
+        had_usable_response |= api_usable;
+        if let Some(release) = api_release {
+            return Ok(Some(release));
         }
 
         if had_usable_response {
@@ -234,6 +192,54 @@ impl GitHubService {
                 owner, repo
             ))
         }
+    }
+
+    async fn check_latest_version_api(
+        client: &reqwest::Client,
+        owner: &str,
+        repo: &str,
+    ) -> (bool, Option<GitHubReleaseInfo>) {
+        let release_url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+        let mut request = client
+            .get(release_url)
+            .header("User-Agent", "SkillSync-App")
+            .header("Accept", "application/vnd.github.v3+json");
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(_) => return (false, None),
+        };
+        let usable =
+            response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND;
+        if !response.status().is_success() {
+            return (usable, None);
+        }
+        let release = match response.json::<serde_json::Value>().await {
+            Ok(release) => release,
+            Err(_) => return (usable, None),
+        };
+        let Some(tag) = release.get("tag_name").and_then(|value| value.as_str()) else {
+            return (usable, None);
+        };
+        let tag = tag.trim().to_string();
+        let release = (!tag.is_empty()).then(|| GitHubReleaseInfo {
+            tag_name: tag,
+            name: release
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            body: release
+                .get("body")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            published_at: release
+                .get("published_at")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        });
+        (usable, release)
     }
 
     pub fn extract_tag_from_atom(atom_text: &str) -> Option<String> {

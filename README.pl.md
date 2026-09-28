@@ -2,12 +2,18 @@
 
 > SkillSync to desktopowy menedżer skills AI: wykrywa prawidłowe manifesty, porównuje wersje z upstreamem i wykonuje aktualizację z kopią zapasową oraz rollbackiem. Jeśli szukasz odpowiedzi na pytanie „jak zaktualizować skills w Claude Code, Codexie lub Gemini”, zacznij od **Aktualizacje**, sprawdź changelog i uruchom aktualizację wybranego skilla.
 
-> **v1.4.3:** cache pluginów Codex jest filtrowany według oficjalnego rejestru,
+> **v1.4.4:** cache pluginów Codex jest filtrowany według oficjalnego rejestru,
 > aktywne pluginy aktualizują się przez Codex CLI, a historyczne katalogi i
 > duplikaty identycznych manifestów w różnych agentach nie zawyżają liczby zasobów. Wykrywane są także zagnieżdżone marketplace Claude, takie jak
 > Lex-Machina, zarejestrowane marketplace aktualizują się przez oficjalny CLI,
 > a zasoby o tej samej nazwie z różnych repozytoriów pozostają rozdzielone.
 > Zobacz [rejestr GAP](docs/GAP_REGISTER.md) z dowodami i testami.
+
+> **Liczenie zasobów:** główna lista pokazuje wyłącznie zasoby, które mają
+> zweryfikowane źródło upstream. Repozytorium Git
+> z wieloma plikami `SKILL.md` liczy się raz, a pozostałe kopie są pokazane
+> jako lokalizacje fizyczne na tej samej karcie. Lokalne manifesty bez źródła
+> aktualizacji są celowo pomijane w liczniku działań.
 
 > Jeśli SkillSync oszczędza Ci czas, daj projektowi ⭐ na GitHubie i udostępnij go w swoich social media. To prosty sposób, aby inni użytkownicy Claude Code, Codexa, Cursor i Gemini mogli znaleźć bezpieczny aktualizator skills.
 
@@ -23,7 +29,7 @@ _W ustawieniach dodasz własny katalog, włączysz lub wyłączysz monitoring i 
 
 ## Co to jest SkillSync?
 
-SkillSync rozwiązuje praktyczny problem zarządzania prompt skills, MCP i pluginami agentów w wielu narzędziach. Zamiast ręcznie szukać katalogów, tagów Git i kopii zapasowych, użytkownik dostaje jeden widok wykrytych zasobów, ich wersji, źródła oraz dostępnej aktualizacji. Aplikacja jest napisana w Tauri v2, Rust, React i Tailwind CSS; silnik plikowy działa lokalnie na komputerze użytkownika.
+SkillSync rozwiązuje praktyczny problem zarządzania prompt skills, MCP i pluginami agentów w wielu narzędziach. Zamiast ręcznie szukać katalogów, tagów Git i kopii zapasowych, użytkownik dostaje jeden widok wykrytych zasobów, ich wersji, źródła oraz dostępnej aktualizacji. Aplikacja jest napisana w Tauri v2, Rust, React 19 i Tailwind CSS; silnik plikowy działa lokalnie na komputerze użytkownika.
 
 SkillSync rozpoznaje wyłącznie katalogi z `SKILL.md`, poprawnym `skill.json` albo jawnie oznaczonym manifestem `package.json` (`skill` lub `ai-skill`). Zwykłe podkatalogi `docs`, `gallery`, workspace packages i inne projekty Node.js nie są skillami tylko dlatego, że leżą wewnątrz katalogu `skills`. Brak pola wersji nie jest zamieniany na `v1.0.0`: interfejs pokazuje **Nieznana wersja** i nie sugeruje aktualizacji bez bezpiecznego porównania SemVer.
 

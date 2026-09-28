@@ -33,6 +33,36 @@ struct UpdateOperation {
     is_git: bool,
 }
 
+struct UpdatePlan {
+    target_tag: String,
+    target_version: Option<String>,
+    explicit_branch: Option<String>,
+    canonical_targets: Vec<PathBuf>,
+    operations: Vec<UpdateOperation>,
+    planned_tags: HashMap<String, String>,
+    planned_branch_commits: HashMap<String, String>,
+}
+
+struct OperationResult {
+    tracked_branch: Option<String>,
+    resolved_latest_version: Option<String>,
+    resolved_version: Option<String>,
+    resolved_tag: Option<String>,
+    resolved_locations: Option<Vec<PathBuf>>,
+}
+
+struct ExecutionContext<'a> {
+    skill: &'a SkillMetadata,
+    target_version: &'a Option<String>,
+    target_tag: &'a str,
+    explicit_branch: &'a Option<String>,
+    planned_tags: &'a HashMap<String, String>,
+    planned_branch_commits: &'a HashMap<String, String>,
+    canonical_targets: &'a [PathBuf],
+    snapshots: &'a [(PathBuf, crate::models::skill::BackupSnapshot)],
+    allow_dirty_worktree: bool,
+}
+
 impl UpdateOrchestrator {
     pub async fn update_skill_atomic(
         skill: &SkillMetadata,
@@ -44,497 +74,45 @@ impl UpdateOrchestrator {
             .lock()
             .await;
 
-        // Only a user-selected branch overrides the release policy. A branch
-        // merely detected from the current checkout is not a tracking choice:
-        // tagged repositories must continue to update by their newest tag.
-        let explicit_branch = skill
-            .branch_override
-            .clone()
-            .filter(|branch| !branch.trim().is_empty());
-        let target_tag = target_version
-            .clone()
-            .or_else(|| skill.latest_version.clone())
-            .unwrap_or_else(|| skill.current_version.clone());
-        let mut tracked_branch = explicit_branch.clone();
-        let mut resolved_latest_version = skill.latest_version.clone();
-
-        let mut locations: Vec<PathBuf> = skill.installed_locations.clone();
-        if !locations.contains(&skill.path) {
-            locations.push(skill.path.clone());
-        }
-
-        // Resolve *every* declared location before creating a snapshot or
-        // checking anything out. Silently dropping a missing path made a
-        // partial update look successful and left a stale installation behind.
-        let canonical_targets = Self::resolve_locations(&locations)?;
-        let operations = Self::plan_operations(&canonical_targets);
-
-        // Resolve each remote's release once before touching any location.
-        // Previously every operation called `ls-remote` independently and a
-        // multi-location update could select different tags during a moving
-        // upstream release. A shared plan makes the transaction deterministic
-        // and lets non-Git mirrors use the same release as their Git source.
-        let mut planned_tags = HashMap::<String, String>::new();
-        let mut planned_default_tag = None;
-        if explicit_branch.is_none() && target_version.is_none() {
-            for operation in operations.iter().filter(|operation| operation.is_git) {
-                let Some(remote) = GitService::get_remote_url(&operation.target) else {
-                    continue;
-                };
-                let remote_key = Self::remote_key(&remote);
-                if planned_tags.contains_key(&remote_key) {
-                    continue;
-                }
-                if let Some(tag) = GitService::get_latest_remote_tag(&operation.target)? {
-                    if planned_default_tag.is_none() {
-                        planned_default_tag = Some(tag.clone());
-                    }
-                    planned_tags.insert(remote_key, tag);
-                }
-            }
-        }
-        let target_tag = planned_default_tag
-            .as_deref()
-            .map(|tag| tag.trim_start_matches(['v', 'V']).to_string())
-            .unwrap_or(target_tag);
-
-        let mut planned_branch_commits = HashMap::<String, String>::new();
-        if let Some(branch) = explicit_branch.as_deref() {
-            for operation in operations.iter().filter(|operation| operation.is_git) {
-                let Some(remote) = GitService::get_remote_url(&operation.target) else {
-                    continue;
-                };
-                let remote_key = Self::remote_key(&remote);
-                if planned_branch_commits.contains_key(&remote_key) {
-                    continue;
-                }
-                planned_branch_commits.insert(
-                    remote_key,
-                    GitService::get_remote_branch_commit(&operation.target, branch)?,
-                );
-            }
-        }
-
-        // Never snapshot, check out, or rewrite an arbitrary directory. The
-        // detector should make this guard unreachable in normal use, but it is
-        // the transaction-level safety net for stale UI state and custom IPC.
-        for target in &canonical_targets {
-            let manifest =
-                ManagedManifest::validate(&skill.item_type, target).map_err(|reason| {
-                    SkillSyncError::InvalidManifest(format!("{}: {reason}", target.display()))
-                })?;
-            let safe_adapter = (skill.item_type == ManagedItemType::Mcp
-                && manifest == ManagedManifestKind::LaravelBoost
-                && McpService::is_laravel_boost_project(target))
-                || (skill.item_type == ManagedItemType::Plugin
-                    && manifest == ManagedManifestKind::Plugin
-                    && (ClaudePluginService::installation_for_path(target).is_some()
-                        || ClaudePluginService::marketplace_for_path(target).is_some()
-                        || CodexPluginService::installation_for_path(target).is_some()));
-            if !GitService::is_git_repository(target)
-                && skill.item_type != ManagedItemType::Skill
-                && !safe_adapter
-            {
-                return Err(SkillSyncError::UnsupportedUpdateMethod(format!(
-                    "{} nie jest repozytorium Git. SkillSync monitoruje ten manifest, ale nie uruchomi automatycznie menedżera pakietów bez jawnego, bezpiecznego adaptera aktualizacji.",
-                    target.display()
-                )));
-            }
-        }
-
-        // A repository can expose several nested skills. It is one working
-        // tree, so check its dirty state once and perform at most one checkout
-        // for it. This prevents concurrent/nested entries from invalidating
-        // each other's path during an update.
-        for operation in &operations {
-            if operation.is_git && !allow_dirty_worktree {
-                let target = &operation.target;
-                let clean = GitService::is_worktree_clean(target)?;
-                let safe_legacy_skill_metadata = skill.item_type == ManagedItemType::Skill
-                    && !clean
-                    && GitService::has_only_skill_version_metadata_change(target)?;
-                if !clean && !safe_legacy_skill_metadata {
-                    return Err(SkillSyncError::WorktreeDirty);
-                }
-            }
-        }
-
-        // 1. Stage: Create Atomic Snapshots for all target paths
-        let mut snapshots = Vec::new();
-        for operation in &operations {
-            let snapshot_target = &operation.target;
-            let snapshot =
-                BackupService::create_snapshot(snapshot_target, &skill.id, &skill.current_version)
-                    .map_err(|error| {
-                        SkillSyncError::FileSystem(format!(
-                            "Nie udało się utworzyć migawki bezpieczeństwa dla zasobu {} (katalog kopii: {}): {error}",
-                            operation.logical_target.display(),
-                            snapshot_target.display(),
-                        ))
-                    })?;
-            snapshots.push((snapshot_target.clone(), snapshot));
-        }
-
-        // 2. Stage: Perform updates across all locations
-        let mut resolved_version: Option<String> = None;
-        let mut resolved_tag: Option<String> = None;
-        let mut resolved_locations: Option<Vec<PathBuf>> = None;
-        for operation in &operations {
-            let target = &operation.target;
-            let logical_target = &operation.logical_target;
-            let manifest =
-                ManagedManifest::validate(&skill.item_type, logical_target).map_err(|reason| {
-                    SkillSyncError::InvalidManifest(format!(
-                        "{}: {reason}",
-                        logical_target.display()
-                    ))
-                })?;
-            let mut verification_targets = vec![logical_target.clone()];
-
-            // Laravel Boost installed in an application root is owned by
-            // Composer, not by the application's Git remote. Run its explicit
-            // adapter only when lockfile evidence proves it is installed.
-            if skill.item_type == ManagedItemType::Mcp
-                && manifest == ManagedManifestKind::LaravelBoost
-                && McpService::is_laravel_boost_project(logical_target)
-            {
-                if let Err(error) = McpService::update_laravel_boost(logical_target) {
-                    for (t, snap) in &snapshots {
-                        let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                    }
-                    return Err(error);
-                }
-                let version =
-                    McpService::laravel_boost_version(logical_target).ok_or_else(|| {
-                        SkillSyncError::IntegrityCheckFailed(format!(
-                            "composer.lock nie zawiera laravel/boost po aktualizacji w {}",
-                            logical_target.display()
-                        ))
-                    })?;
-                if let Some(previous) = &resolved_version {
-                    if previous != &version {
-                        for (t, snap) in &snapshots {
-                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                        }
-                        return Err(SkillSyncError::IntegrityCheckFailed(
-                            "różne lokalizacje Laravel Boost mają różne wersje po aktualizacji"
-                                .to_string(),
-                        ));
-                    }
-                } else {
-                    resolved_version = Some(version);
-                }
-            // Claude Code cache plugins must be updated by the CLI that owns
-            // their registry, never by copying cache files directly.
-            } else if skill.item_type == ManagedItemType::Plugin
-                && manifest == ManagedManifestKind::Plugin
-                && ClaudePluginService::installation_for_path(logical_target).is_some()
-            {
-                let locations = match ClaudePluginService::update(logical_target) {
-                    Ok(locations) => locations,
-                    Err(error) => {
-                        for (t, snap) in &snapshots {
-                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                        }
-                        return Err(error);
-                    }
-                };
-                let version =
-                    ClaudePluginService::plugin_version(&locations[0]).ok_or_else(|| {
-                        SkillSyncError::IntegrityCheckFailed(format!(
-                            "Claude Code nie podał wersji pluginu po aktualizacji w {}",
-                            locations[0].display()
-                        ))
-                    })?;
-                verification_targets = locations.clone();
-                resolved_locations = Some(locations);
-                resolved_version = Some(version);
-            // Claude marketplace checkouts are registry-owned sources. The
-            // marketplace command updates the catalog and its plugin manifests
-            // together; treating the directory as a generic Git repository
-            // would fail for legitimate installations without a local .git.
-            } else if skill.item_type == ManagedItemType::Plugin
-                && manifest == ManagedManifestKind::Plugin
-                && ClaudePluginService::marketplace_for_path(logical_target).is_some()
-            {
-                let locations = match ClaudePluginService::update_marketplace(logical_target) {
-                    Ok(locations) => locations,
-                    Err(error) => {
-                        for (t, snap) in &snapshots {
-                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                        }
-                        return Err(error);
-                    }
-                };
-                let version =
-                    ClaudePluginService::plugin_version(&locations[0]).ok_or_else(|| {
-                        SkillSyncError::IntegrityCheckFailed(format!(
-                            "Claude Code nie podał wersji marketplace po aktualizacji w {}",
-                            locations[0].display()
-                        ))
-                    })?;
-                verification_targets = locations.clone();
-                resolved_locations = Some(locations);
-                resolved_version = Some(version);
-            // Codex owns its marketplace/cache layout. Never update a Codex
-            // plugin by copying files or checking out Git; delegate to the
-            // official CLI and verify the resulting active manifest.
-            } else if skill.item_type == ManagedItemType::Plugin
-                && manifest == ManagedManifestKind::Plugin
-                && CodexPluginService::installation_for_path(logical_target).is_some()
-            {
-                let locations = match CodexPluginService::update(logical_target) {
-                    Ok(locations) => locations,
-                    Err(error) => {
-                        for (t, snap) in &snapshots {
-                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                        }
-                        return Err(error);
-                    }
-                };
-                let version =
-                    CodexPluginService::plugin_version(&locations[0]).ok_or_else(|| {
-                        SkillSyncError::IntegrityCheckFailed(format!(
-                            "Codex nie pozostawił wersji w manifeście pluginu po aktualizacji w {}",
-                            locations[0].display()
-                        ))
-                    })?;
-                verification_targets = locations.clone();
-                resolved_locations = Some(locations);
-                resolved_version = Some(version);
-            // A. If Git repo, perform fetch and checkout
-            } else if operation.is_git {
-                // A portable package can need a tiny local SKILL.md adapter
-                // for discovery. If a later upstream release introduces its
-                // own tracked SKILL.md, Git correctly refuses to overwrite
-                // the untracked adapter. Remove only our unmistakably
-                // generated, untracked adapter after the snapshot exists;
-                // user-authored and upstream-tracked manifests stay intact.
-                for location in canonical_targets.iter().filter(|location| {
-                    GitService::repository_root(location).as_deref() == Some(target.as_path())
-                }) {
-                    if let Err(error) = Self::remove_generated_skill_adapter(location) {
-                        for (t, snap) in &snapshots {
-                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                        }
-                        return Err(error);
-                    }
-                }
-
-                let safe_legacy_skill_metadata = skill.item_type == ManagedItemType::Skill
-                    && !GitService::is_worktree_clean(target)?
-                    && GitService::has_only_skill_version_metadata_change(target)?;
-                let allow_git_checkout = allow_dirty_worktree || safe_legacy_skill_metadata;
-                let checkout_result = if let Some(branch) = &explicit_branch {
-                    tracked_branch = Some(branch.clone());
-                    resolved_latest_version = Some(branch.clone());
-                    let result =
-                        GitService::fetch_and_checkout_branch(target, branch, allow_git_checkout);
-                    if result.is_ok() {
-                        if let Some(remote) = GitService::get_remote_url(target) {
-                            if let Some(expected) =
-                                planned_branch_commits.get(&Self::remote_key(&remote))
-                            {
-                                if GitService::get_head_commit(target).as_deref()
-                                    != Some(expected.as_str())
-                                {
-                                    for (t, snap) in &snapshots {
-                                        let _ = BackupService::restore_snapshot(
-                                            t,
-                                            &snap.backup_file_path,
-                                        );
-                                    }
-                                    return Err(SkillSyncError::IntegrityCheckFailed(
-                                        "gałąź upstream zmieniła się w trakcie aktualizacji; ponów próbę"
-                                            .to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    result
-                } else if let Some(requested_tag) = target_version.as_deref() {
-                    tracked_branch = None;
-                    let version = requested_tag.trim_start_matches(['v', 'V']).to_string();
-                    resolved_latest_version = Some(version.clone());
-                    resolved_version = Some(version);
-                    GitService::fetch_and_checkout_tag(target, requested_tag, allow_git_checkout)
-                } else {
-                    let planned_tag = GitService::get_remote_url(target)
-                        .and_then(|remote| planned_tags.get(&Self::remote_key(&remote)).cloned());
-                    let remote_tag = match planned_tag {
-                        Some(tag) => Some(tag),
-                        None => GitService::get_latest_remote_tag(target)?,
-                    };
-                    match remote_tag {
-                        Some(remote_tag) => {
-                            tracked_branch = None;
-                            let version = remote_tag.trim_start_matches(['v', 'V']).to_string();
-                            if let Some(previous) = &resolved_tag {
-                                if previous.trim_start_matches(['v', 'V']) != version.as_str() {
-                                    for (t, snap) in &snapshots {
-                                        let _ = BackupService::restore_snapshot(
-                                            t,
-                                            &snap.backup_file_path,
-                                        );
-                                    }
-                                    return Err(SkillSyncError::IntegrityCheckFailed(
-                                        "lokalizacje wskazują różne wydania upstream; aktualizacja została wycofana"
-                                            .to_string(),
-                                    ));
-                                }
-                            }
-                            resolved_tag = Some(remote_tag.clone());
-                            resolved_latest_version = Some(version.clone());
-                            resolved_version = Some(version);
-                            GitService::fetch_and_checkout_tag(
-                                target,
-                                &remote_tag,
-                                allow_git_checkout,
-                            )
-                        }
-                        None => {
-                            let branch = GitService::resolve_fallback_branch(
-                                target,
-                                skill.detected_branch.as_deref(),
-                            )?;
-                            tracked_branch = Some(branch.clone());
-                            resolved_latest_version = Some(branch.clone());
-                            GitService::fetch_and_checkout_branch(
-                                target,
-                                &branch,
-                                allow_git_checkout,
-                            )
-                        }
-                    }
-                };
-                if let Err(e) = checkout_result {
-                    for (t, snap) in &snapshots {
-                        let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                    }
-                    return Err(e);
-                }
-            } else if skill.item_type == ManagedItemType::Skill {
-                if let Some(ref remote_url) = skill.remote_url {
-                    // If not git repo, fetch latest upstream SKILL.md if available
-                    let Some(upstream_content) =
-                        GitHubService::fetch_raw_skill_md(remote_url, &target_tag, &skill.name)
-                            .await
-                    else {
-                        for (t, snap) in &snapshots {
-                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                        }
-                        return Err(SkillSyncError::IntegrityCheckFailed(format!(
-                            "Nie można pobrać manifestu skilla {} z {} dla wersji {}",
-                            skill.name, remote_url, target_tag
-                        )));
-                    };
-                    let skill_md_path = logical_target.join("SKILL.md");
-                    if let Err(error) = fs::write(&skill_md_path, upstream_content) {
-                        for (t, snap) in &snapshots {
-                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                        }
-                        return Err(SkillSyncError::FileSystem(format!(
-                            "Nie można zapisać manifestu skilla po aktualizacji w {}: {error}",
-                            skill_md_path.display()
-                        )));
-                    }
-                }
-            } else {
-                for (t, snap) in &snapshots {
-                    let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                }
-                return Err(SkillSyncError::UnsupportedUpdateMethod(format!(
-                    "{} nie jest repozytorium Git. SkillSync monitoruje ten manifest, ale nie uruchomi automatycznie menedżera pakietów bez jawnego, bezpiecznego adaptera aktualizacji.",
-                    target.display()
-                )));
-            }
-
-            // B. Update manifests on disk (SKILL.md, skill.json, package.json)
-            if skill.item_type == ManagedItemType::Skill && !operation.is_git {
-                if let Err(e) = Self::update_skill_md_version(logical_target, &target_tag) {
-                    for (t, snap) in &snapshots {
-                        let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                    }
-                    return Err(e);
-                }
-
-                Self::update_skill_json_version(logical_target, &target_tag)?;
-                if SkillManifest::is_explicit_package_skill(logical_target) {
-                    Self::update_package_json_version(logical_target, &target_tag)?;
-                }
-            }
-
-            // Some upstreams evolve a tracked SKILL.md into a portable Node
-            // package. The package is still the same skill only when its
-            // declared name matches the discovered skill and it exposes a
-            // command entry point. Keep it discoverable with a local adapter
-            // instead of rolling back an otherwise valid tagged release.
-            if skill.item_type == ManagedItemType::Skill
-                && GitService::is_git_repository(target)
-                && !Self::verify_integrity(&skill.item_type, logical_target)
-            {
-                let adapter_version = resolved_latest_version.as_deref().unwrap_or(&target_tag);
-                if let Err(error) = Self::materialize_package_skill_adapter(
-                    logical_target,
-                    &skill.name,
-                    adapter_version,
-                ) {
-                    for (t, snap) in &snapshots {
-                        let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                    }
-                    return Err(error);
-                }
-            }
-
-            // C. Stage: Post-Update Integrity Verification
-            for verification_target in verification_targets {
-                if !Self::verify_integrity(&skill.item_type, &verification_target) {
-                    for (t, snap) in &snapshots {
-                        let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                    }
-                    return Err(SkillSyncError::IntegrityCheckFailed(format!(
-                        "Manifest zasobu jest uszkodzony lub nieobecny po aktualizacji w {:?}",
-                        verification_target
-                    )));
-                }
-            }
-
-            // A branch update is commit-based, so the release tag cannot tell
-            // us the new package version. Re-read the manifest after checkout
-            // instead of leaving the pre-update version in the UI.
-            if tracked_branch.is_some() {
-                if let Some(version) = Self::version_from_manifest(&skill.item_type, logical_target)
-                {
-                    if let Some(previous) = &resolved_version {
-                        if previous != &version {
-                            for (t, snap) in &snapshots {
-                                let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
-                            }
-                            return Err(SkillSyncError::IntegrityCheckFailed(
-                                "różne lokalizacje mają różne wersje po aktualizacji".to_string(),
-                            ));
-                        }
-                    } else {
-                        resolved_version = Some(version);
-                    }
-                }
-            }
-        }
+        let plan = Self::build_plan(skill, target_version)?;
+        Self::validate_plan(skill, &plan, allow_dirty_worktree)?;
+        let snapshots = Self::create_snapshots(skill, &plan.operations)?;
+        let canonical_targets = &plan.canonical_targets;
+        let operations = &plan.operations;
+        let explicit_branch = &plan.explicit_branch;
+        let planned_tags = &plan.planned_tags;
+        let planned_branch_commits = &plan.planned_branch_commits;
+        let target_tag = &plan.target_tag;
+        let target_version = &plan.target_version;
+        let context = ExecutionContext {
+            skill,
+            target_version,
+            target_tag,
+            explicit_branch,
+            planned_tags,
+            planned_branch_commits,
+            canonical_targets,
+            snapshots: &snapshots,
+            allow_dirty_worktree,
+        };
+        let OperationResult {
+            tracked_branch,
+            resolved_latest_version,
+            resolved_version,
+            resolved_tag: _resolved_tag,
+            resolved_locations,
+        } = Self::execute_operations(&context, operations)
+            .await
+            .inspect_err(|_| Self::restore_snapshots(&snapshots))?;
 
         // The operation can only be reported as successful once every
         // location supplied by discovery still exists and exposes a valid
         // manifest. This catches stale aliases and nested package paths after
         // a checkout before the UI persists an optimistic version.
         let mut observed_versions = Vec::new();
-        for target in &canonical_targets {
+        for target in canonical_targets {
             if !Self::verify_integrity(&skill.item_type, target) {
-                for (snapshot_target, snapshot) in &snapshots {
-                    let _ = BackupService::restore_snapshot(
-                        snapshot_target,
-                        &snapshot.backup_file_path,
-                    );
-                }
+                Self::restore_snapshots(&snapshots);
                 return Err(SkillSyncError::IntegrityCheckFailed(format!(
                     "Manifest zasobu jest uszkodzony lub nieobecny po aktualizacji w {:?}",
                     target
@@ -547,10 +125,7 @@ impl UpdateOrchestrator {
             }
         }
         if observed_versions.len() > 1 {
-            for (snapshot_target, snapshot) in &snapshots {
-                let _ =
-                    BackupService::restore_snapshot(snapshot_target, &snapshot.backup_file_path);
-            }
+            Self::restore_snapshots(&snapshots);
             return Err(SkillSyncError::IntegrityCheckFailed(
                 "różne lokalizacje mają różne wersje po aktualizacji; przywrócono wszystkie migawki"
                     .to_string(),
@@ -596,6 +171,502 @@ impl UpdateOrchestrator {
         }
 
         Ok(updated)
+    }
+
+    fn apply_owner_update(
+        skill: &SkillMetadata,
+        manifest: ManagedManifestKind,
+        logical_target: &Path,
+        verification_targets: &mut Vec<PathBuf>,
+        state: &mut OperationResult,
+    ) -> Result<bool, SkillSyncError> {
+        if skill.item_type == ManagedItemType::Mcp
+            && manifest == ManagedManifestKind::LaravelBoost
+            && McpService::is_laravel_boost_project(logical_target)
+        {
+            McpService::update_laravel_boost(logical_target)?;
+            let version = McpService::laravel_boost_version(logical_target).ok_or_else(|| {
+                SkillSyncError::IntegrityCheckFailed(format!(
+                    "composer.lock nie zawiera laravel/boost po aktualizacji w {}",
+                    logical_target.display()
+                ))
+            })?;
+            Self::set_consistent_version(
+                state,
+                version,
+                "różne lokalizacje Laravel Boost mają różne wersje po aktualizacji",
+            )?;
+            return Ok(true);
+        }
+
+        if skill.item_type != ManagedItemType::Plugin || manifest != ManagedManifestKind::Plugin {
+            return Ok(false);
+        }
+        let (locations, label) =
+            if ClaudePluginService::installation_for_path(logical_target).is_some() {
+                (
+                    ClaudePluginService::update(logical_target)?,
+                    "Claude Code nie podał wersji pluginu",
+                )
+            } else if ClaudePluginService::marketplace_for_path(logical_target).is_some() {
+                (
+                    ClaudePluginService::update_marketplace(logical_target)?,
+                    "Claude Code nie podał wersji marketplace",
+                )
+            } else if CodexPluginService::installation_for_path(logical_target).is_some() {
+                (
+                    CodexPluginService::update(logical_target)?,
+                    "Codex nie pozostawił wersji w manifeście pluginu",
+                )
+            } else {
+                return Ok(false);
+            };
+        let first = locations.first().ok_or_else(|| {
+            SkillSyncError::IntegrityCheckFailed(format!("{label} po aktualizacji"))
+        })?;
+        let version = match (label, first) {
+            ("Claude Code nie podał wersji pluginu", path) => {
+                ClaudePluginService::plugin_version(path)
+            }
+            ("Claude Code nie podał wersji marketplace", path) => {
+                ClaudePluginService::plugin_version(path)
+            }
+            ("Codex nie pozostawił wersji w manifeście pluginu", path) => {
+                CodexPluginService::plugin_version(path)
+            }
+            _ => None,
+        }
+        .ok_or_else(|| {
+            SkillSyncError::IntegrityCheckFailed(format!(
+                "{label} po aktualizacji w {}",
+                first.display()
+            ))
+        })?;
+        *verification_targets = locations.clone();
+        state.resolved_locations = Some(locations);
+        state.resolved_version = Some(version);
+        Ok(true)
+    }
+
+    fn set_consistent_version(
+        state: &mut OperationResult,
+        version: String,
+        message: &str,
+    ) -> Result<(), SkillSyncError> {
+        if let Some(previous) = &state.resolved_version {
+            if previous != &version {
+                return Err(SkillSyncError::IntegrityCheckFailed(message.to_string()));
+            }
+        } else {
+            state.resolved_version = Some(version);
+        }
+        Ok(())
+    }
+
+    async fn execute_operations(
+        context: &ExecutionContext<'_>,
+        operations: &[UpdateOperation],
+    ) -> Result<OperationResult, SkillSyncError> {
+        let mut state = OperationResult {
+            tracked_branch: context.explicit_branch.clone(),
+            resolved_latest_version: context.skill.latest_version.clone(),
+            resolved_version: None,
+            resolved_tag: None,
+            resolved_locations: None,
+        };
+        for operation in operations {
+            Self::execute_single_operation(context, operation, &mut state).await?;
+        }
+        Ok(state)
+    }
+
+    fn apply_git_update(
+        context: &ExecutionContext<'_>,
+        target: &Path,
+        state: &mut OperationResult,
+    ) -> Result<(), SkillSyncError> {
+        let skill = context.skill;
+        let target_version = context.target_version;
+        let explicit_branch = context.explicit_branch;
+        let planned_tags = context.planned_tags;
+        let planned_branch_commits = context.planned_branch_commits;
+        let canonical_targets = context.canonical_targets;
+        let allow_dirty_worktree = context.allow_dirty_worktree;
+        let snapshots = context.snapshots;
+        // A portable package can need a tiny local SKILL.md adapter
+        // for discovery. If a later upstream release introduces its
+        // own tracked SKILL.md, Git correctly refuses to overwrite
+        // the untracked adapter. Remove only our unmistakably
+        // generated, untracked adapter after the snapshot exists;
+        // user-authored and upstream-tracked manifests stay intact.
+        for location in canonical_targets
+            .iter()
+            .filter(|location| GitService::repository_root(location).as_deref() == Some(target))
+        {
+            if let Err(error) = Self::remove_generated_skill_adapter(location) {
+                for (t, snap) in snapshots {
+                    let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                }
+                return Err(error);
+            }
+        }
+
+        let safe_legacy_skill_metadata = skill.item_type == ManagedItemType::Skill
+            && !GitService::is_worktree_clean(target)?
+            && GitService::has_only_skill_version_metadata_change(target)?;
+        let allow_git_checkout = allow_dirty_worktree || safe_legacy_skill_metadata;
+        let checkout_result = if let Some(branch) = &explicit_branch {
+            state.tracked_branch = Some(branch.clone());
+            state.resolved_latest_version = Some(branch.clone());
+            let result = GitService::fetch_and_checkout_branch(target, branch, allow_git_checkout);
+            if result.is_ok() {
+                if let Some(remote) = GitService::get_remote_url(target) {
+                    if let Some(expected) = planned_branch_commits.get(&Self::remote_key(&remote)) {
+                        if GitService::get_head_commit(target).as_deref() != Some(expected.as_str())
+                        {
+                            for (t, snap) in snapshots {
+                                let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                            }
+                            return Err(SkillSyncError::IntegrityCheckFailed(
+                                "gałąź upstream zmieniła się w trakcie aktualizacji; ponów próbę"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+            result
+        } else if let Some(requested_tag) = target_version.as_deref() {
+            state.tracked_branch = None;
+            let version = requested_tag.trim_start_matches(['v', 'V']).to_string();
+            state.resolved_latest_version = Some(version.clone());
+            state.resolved_version = Some(version);
+            GitService::fetch_and_checkout_tag(target, requested_tag, allow_git_checkout)
+        } else {
+            let planned_tag = GitService::get_remote_url(target)
+                .and_then(|remote| planned_tags.get(&Self::remote_key(&remote)).cloned());
+            let remote_tag = match planned_tag {
+                Some(tag) => Some(tag),
+                None => GitService::get_latest_remote_tag(target)?,
+            };
+            match remote_tag {
+                Some(remote_tag) => {
+                    state.tracked_branch = None;
+                    let version = remote_tag.trim_start_matches(['v', 'V']).to_string();
+                    if let Some(previous) = &state.resolved_tag {
+                        if previous.trim_start_matches(['v', 'V']) != version.as_str() {
+                            for (t, snap) in snapshots {
+                                let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                            }
+                            return Err(SkillSyncError::IntegrityCheckFailed(
+                                        "lokalizacje wskazują różne wydania upstream; aktualizacja została wycofana"
+                                            .to_string(),
+                                    ));
+                        }
+                    }
+                    state.resolved_tag = Some(remote_tag.clone());
+                    state.resolved_latest_version = Some(version.clone());
+                    state.resolved_version = Some(version);
+                    GitService::fetch_and_checkout_tag(target, &remote_tag, allow_git_checkout)
+                }
+                None => {
+                    let branch = GitService::resolve_fallback_branch(
+                        target,
+                        skill.detected_branch.as_deref(),
+                    )?;
+                    state.tracked_branch = Some(branch.clone());
+                    state.resolved_latest_version = Some(branch.clone());
+                    GitService::fetch_and_checkout_branch(target, &branch, allow_git_checkout)
+                }
+            }
+        };
+        if let Err(e) = checkout_result {
+            for (t, snap) in snapshots {
+                let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+            }
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    async fn execute_single_operation(
+        context: &ExecutionContext<'_>,
+        operation: &UpdateOperation,
+        state: &mut OperationResult,
+    ) -> Result<(), SkillSyncError> {
+        let skill = context.skill;
+        let target_tag = context.target_tag;
+        let snapshots = context.snapshots;
+        let target = &operation.target;
+        let logical_target = &operation.logical_target;
+        let manifest =
+            ManagedManifest::validate(&skill.item_type, logical_target).map_err(|reason| {
+                SkillSyncError::InvalidManifest(format!("{}: {reason}", logical_target.display()))
+            })?;
+        let mut verification_targets = vec![logical_target.to_path_buf()];
+
+        if Self::apply_owner_update(
+            skill,
+            manifest,
+            logical_target,
+            &mut verification_targets,
+            state,
+        )? {
+        } else if operation.is_git {
+            Self::apply_git_update(context, target, state)?;
+        } else if skill.item_type == ManagedItemType::Skill {
+            if let Some(ref remote_url) = skill.remote_url {
+                // If not git repo, fetch latest upstream SKILL.md if available
+                let Some(upstream_content) =
+                    GitHubService::fetch_raw_skill_md(remote_url, target_tag, &skill.name).await
+                else {
+                    for (t, snap) in snapshots {
+                        let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                    }
+                    return Err(SkillSyncError::IntegrityCheckFailed(format!(
+                        "Nie można pobrać manifestu skilla {} z {} dla wersji {}",
+                        skill.name, remote_url, target_tag
+                    )));
+                };
+                let skill_md_path = logical_target.join("SKILL.md");
+                if let Err(error) = fs::write(&skill_md_path, upstream_content) {
+                    for (t, snap) in snapshots {
+                        let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                    }
+                    return Err(SkillSyncError::FileSystem(format!(
+                        "Nie można zapisać manifestu skilla po aktualizacji w {}: {error}",
+                        skill_md_path.display()
+                    )));
+                }
+            }
+        } else {
+            for (t, snap) in snapshots {
+                let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+            }
+            return Err(SkillSyncError::UnsupportedUpdateMethod(format!(
+                    "{} nie jest repozytorium Git. SkillSync monitoruje ten manifest, ale nie uruchomi automatycznie menedżera pakietów bez jawnego, bezpiecznego adaptera aktualizacji.",
+                    target.display()
+                )));
+        }
+
+        // B. Update manifests on disk (SKILL.md, skill.json, package.json)
+        if skill.item_type == ManagedItemType::Skill && !operation.is_git {
+            if let Err(e) = Self::update_skill_md_version(logical_target, target_tag) {
+                for (t, snap) in snapshots {
+                    let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                }
+                return Err(e);
+            }
+
+            Self::update_skill_json_version(logical_target, target_tag)?;
+            if SkillManifest::is_explicit_package_skill(logical_target) {
+                Self::update_package_json_version(logical_target, target_tag)?;
+            }
+        }
+
+        // Some upstreams evolve a tracked SKILL.md into a portable Node
+        // package. The package is still the same skill only when its
+        // declared name matches the discovered skill and it exposes a
+        // command entry point. Keep it discoverable with a local adapter
+        // instead of rolling back an otherwise valid tagged release.
+        if skill.item_type == ManagedItemType::Skill
+            && GitService::is_git_repository(target)
+            && !Self::verify_integrity(&skill.item_type, logical_target)
+        {
+            let adapter_version = state
+                .resolved_latest_version
+                .as_deref()
+                .unwrap_or(target_tag);
+            if let Err(error) = Self::materialize_package_skill_adapter(
+                logical_target,
+                &skill.name,
+                adapter_version,
+            ) {
+                for (t, snap) in snapshots {
+                    let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                }
+                return Err(error);
+            }
+        }
+
+        // C. Stage: Post-Update Integrity Verification
+        for verification_target in verification_targets {
+            if !Self::verify_integrity(&skill.item_type, &verification_target) {
+                for (t, snap) in snapshots {
+                    let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                }
+                return Err(SkillSyncError::IntegrityCheckFailed(format!(
+                    "Manifest zasobu jest uszkodzony lub nieobecny po aktualizacji w {:?}",
+                    verification_target
+                )));
+            }
+        }
+
+        // A branch update is commit-based, so the release tag cannot tell
+        // us the new package version. Re-read the manifest after checkout
+        // instead of leaving the pre-update version in the UI.
+        if state.tracked_branch.is_some() {
+            if let Some(version) = Self::version_from_manifest(&skill.item_type, logical_target) {
+                if let Some(previous) = &state.resolved_version {
+                    if previous != &version {
+                        for (t, snap) in snapshots {
+                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                        }
+                        return Err(SkillSyncError::IntegrityCheckFailed(
+                            "różne lokalizacje mają różne wersje po aktualizacji".to_string(),
+                        ));
+                    }
+                } else {
+                    state.resolved_version = Some(version);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn build_plan(
+        skill: &SkillMetadata,
+        target_version: Option<String>,
+    ) -> Result<UpdatePlan, SkillSyncError> {
+        let explicit_branch = skill
+            .branch_override
+            .clone()
+            .filter(|branch| !branch.trim().is_empty());
+        let mut locations = skill.installed_locations.clone();
+        if !locations.contains(&skill.path) {
+            locations.push(skill.path.clone());
+        }
+        let canonical_targets = Self::resolve_locations(&locations)?;
+        let operations = Self::plan_operations(&canonical_targets);
+        let mut planned_tags = HashMap::new();
+        let mut planned_default_tag = None;
+        if explicit_branch.is_none() && target_version.is_none() {
+            for operation in operations.iter().filter(|operation| operation.is_git) {
+                let Some(remote) = GitService::get_remote_url(&operation.target) else {
+                    continue;
+                };
+                let key = Self::remote_key(&remote);
+                if planned_tags.contains_key(&key) {
+                    continue;
+                }
+                if let Some(tag) = GitService::get_latest_remote_tag(&operation.target)? {
+                    planned_default_tag.get_or_insert_with(|| tag.clone());
+                    planned_tags.insert(key, tag);
+                }
+            }
+        }
+        let target_tag = planned_default_tag
+            .as_deref()
+            .map(|tag| tag.trim_start_matches(['v', 'V']).to_string())
+            .or_else(|| {
+                target_version
+                    .clone()
+                    .or_else(|| skill.latest_version.clone())
+                    .or_else(|| Some(skill.current_version.clone()))
+            })
+            .unwrap_or_else(|| crate::services::detector::UNKNOWN_SKILL_VERSION.to_string());
+        let mut planned_branch_commits = HashMap::new();
+        if let Some(branch) = explicit_branch.as_deref() {
+            for operation in operations.iter().filter(|operation| operation.is_git) {
+                let Some(remote) = GitService::get_remote_url(&operation.target) else {
+                    continue;
+                };
+                let key = Self::remote_key(&remote);
+                if planned_branch_commits.contains_key(&key) {
+                    continue;
+                }
+                planned_branch_commits.insert(
+                    key,
+                    GitService::get_remote_branch_commit(&operation.target, branch)?,
+                );
+            }
+        }
+        Ok(UpdatePlan {
+            target_tag,
+            target_version,
+            explicit_branch,
+            canonical_targets,
+            operations,
+            planned_tags,
+            planned_branch_commits,
+        })
+    }
+
+    fn validate_plan(
+        skill: &SkillMetadata,
+        plan: &UpdatePlan,
+        allow_dirty_worktree: bool,
+    ) -> Result<(), SkillSyncError> {
+        for target in &plan.canonical_targets {
+            let manifest =
+                ManagedManifest::validate(&skill.item_type, target).map_err(|reason| {
+                    SkillSyncError::InvalidManifest(format!("{}: {reason}", target.display()))
+                })?;
+            let safe_adapter = (skill.item_type == ManagedItemType::Mcp
+                && manifest == ManagedManifestKind::LaravelBoost
+                && McpService::is_laravel_boost_project(target))
+                || (skill.item_type == ManagedItemType::Plugin
+                    && manifest == ManagedManifestKind::Plugin
+                    && (ClaudePluginService::installation_for_path(target).is_some()
+                        || ClaudePluginService::marketplace_for_path(target).is_some()
+                        || CodexPluginService::installation_for_path(target).is_some()));
+            if !GitService::is_git_repository(target)
+                && skill.item_type != ManagedItemType::Skill
+                && !safe_adapter
+            {
+                return Err(SkillSyncError::UnsupportedUpdateMethod(format!(
+                    "{} nie jest repozytorium Git. SkillSync monitoruje ten manifest, ale nie uruchomi automatycznie menedżera pakietów bez jawnego, bezpiecznego adaptera aktualizacji.",
+                    target.display()
+                )));
+            }
+        }
+        if allow_dirty_worktree {
+            return Ok(());
+        }
+        for operation in &plan.operations {
+            if !operation.is_git {
+                continue;
+            }
+            let clean = GitService::is_worktree_clean(&operation.target)?;
+            let metadata_only = skill.item_type == ManagedItemType::Skill
+                && !clean
+                && GitService::has_only_skill_version_metadata_change(&operation.target)?;
+            if !clean && !metadata_only {
+                return Err(SkillSyncError::WorktreeDirty);
+            }
+        }
+        Ok(())
+    }
+
+    fn create_snapshots(
+        skill: &SkillMetadata,
+        operations: &[UpdateOperation],
+    ) -> Result<Vec<(PathBuf, crate::models::skill::BackupSnapshot)>, SkillSyncError> {
+        operations
+            .iter()
+            .map(|operation| {
+                BackupService::create_snapshot(
+                    &operation.target,
+                    &skill.id,
+                    &skill.current_version,
+                )
+                .map(|snapshot| (operation.target.clone(), snapshot))
+                .map_err(|error| {
+                    SkillSyncError::FileSystem(format!(
+                        "Nie udało się utworzyć migawki bezpieczeństwa dla zasobu {} (katalog kopii: {}): {error}",
+                        operation.logical_target.display(),
+                        operation.target.display(),
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    fn restore_snapshots(snapshots: &[(PathBuf, crate::models::skill::BackupSnapshot)]) {
+        for (target, snapshot) in snapshots {
+            let _ = BackupService::restore_snapshot(target, &snapshot.backup_file_path);
+        }
     }
 
     fn resolve_locations(locations: &[PathBuf]) -> Result<Vec<PathBuf>, SkillSyncError> {

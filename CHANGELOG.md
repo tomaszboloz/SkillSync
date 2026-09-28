@@ -2,6 +2,25 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [1.4.4] - 2026-09-28
+
+### Fixed
+
+- A skill installed in Codex, Claude Code, Gemini, Cursor or another monitored
+  agent directory is now represented by one logical card.
+- All canonical installations are retained on that card and updated as one
+  transaction; source-less mirrored copies attach only when exactly one
+  matching upstream exists.
+- Distinct configured symlink aliases remain visible as separate paths while
+  the transaction still mutates one canonical physical checkout.
+- Same-named skills from different upstream repositories remain isolated and
+  receive an explicit repository suffix in the UI.
+- Same-named raw GitHub manifests without a local Git checkout receive the
+  same source suffix, and discovery order is deterministic across scans.
+- CI now rejects Rust functions over 150 lines, preventing the update engine
+  from regressing into a monolithic operation.
+- Added regression coverage for cross-agent copies and ambiguous upstreams.
+
 ## [1.4.3] - 2026-09-28
 
 ### Fixed
@@ -243,4 +262,5 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 [1.4.1]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.1
 [1.4.2]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.2
 [1.4.3]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.3
+[1.4.4]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.4
 [1.3.1]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.3.1

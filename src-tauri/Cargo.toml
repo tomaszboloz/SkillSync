@@ -1,6 +1,6 @@
 [package]
 name = "skillsync"
-version = "1.4.3"
+version = "1.4.4"
 description = "High-Performance Cross-Platform AI Agent Skills Manager"
 authors = ["Tomasz Bołoz <https://www.damtox.pl>"]
 license = "MIT"

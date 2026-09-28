@@ -102,10 +102,15 @@ upstreamu ani nie zastępuje testów środowiskowych na macOS i Windows.
 | GAP-071 | Historyczny Codex cache był traktowany jak repozytorium Git | RESOLVED | `CodexPluginService`, filtr `~/.codex/plugins/cache` |
 | GAP-072 | Aktualizacje Codex pluginów nie miały właścicielskiego adaptera | RESOLVED | `codex plugin marketplace upgrade` + `codex plugin add`, test JSON registry |
 | GAP-073 | Katalog marketplace zawierał niezainstalowane pluginy liczone jako zasoby | RESOLVED | filtr aktywnych ścieżek z `codex plugin list --available --json` |
-| GAP-074 | Symlink/canonical path mógł zawyżać liczbę lokalizacji | RESOLVED | deduplikacja canonical path w detectorach |
+| GAP-074 | Tożsamość fizycznego celu i widoczny alias symlinku były mieszane | RESOLVED | canonical target dla transakcji, leksykalne aliasy zachowane w `installed_locations`, test symlinków |
 | GAP-075 | Brakowało rozdzielenia identycznej nazwy od identycznego źródła | RESOLVED | klucz discovery `name/id + normalized source`, testy różnych repozytoriów |
 | GAP-076 | Aktywny Codex cache z `SKILL.md` był dublowany przez ogólny skaner | RESOLVED | filtr właściciela Codex przed detekcją Skill, testy Rust |
 | GAP-077 | Rejestr Codex był odczytywany wielokrotnie podczas jednego skanu | RESOLVED | snapshot rejestru ograniczony do monitorowanego drzewa |
 | GAP-078 | Stare ścieżki hash-cache pozostawały w konfiguracji po migracji | RESOLVED | sanitizacja konfiguracji przy odczycie i zapisie |
 | GAP-079 | Licznik zasobów mieszał zasoby logiczne z lokalizacjami fizycznymi | RESOLVED | deduplikacja ścieżki kanonicznej i jawny raport lokalizacji |
 | GAP-080 | Identyczne lokalne manifesty bez URL upstream były liczone osobno w każdym agencie | RESOLVED | fingerprint manifestu jako tożsamość lokalnego zasobu, testy identycznego i różnego manifestu |
+| GAP-081 | Każdy zagnieżdżony `SKILL.md` w jednym repozytorium Git był liczony jako osobny zasób, a lokalne manifesty bez źródła wyglądały jak aktualizowalne | RESOLVED | grupowanie po repozytorium/upstream, odfiltrowanie zasobów bez źródła, test jednej aktualizacji dla wielu manifestów |
+| GAP-082 | Ten sam skill zainstalowany w kilku agentach mógł zostać rozdzielony przez brak URL upstream w jednej kopii | RESOLVED | jednoznaczne dołączanie kopii po typie i nazwie, test Codex + Claude oraz bezpieczne odrzucenie niejednoznaczności |
+| GAP-083 | Canonicalizacja symlinków ukrywała aliasy ścieżek Claude/Codex w szczegółach zasobu | RESOLVED | lokalizacje zachowują odrębne aliasy, a checkout nadal deduplikuje fizyczny target, test symlinków |
+| GAP-084 | Dwa nie-Gitowe manifesty GitHub o tej samej nazwie nadal wyglądały jak duplikaty i mogły zmieniać kolejność między skanami | RESOLVED | `disambiguate_source_names`, sortowanie wyniku collapse oraz regresja raw-manifest sources |
+| GAP-085 | Limit rozmiaru funkcji był deklaracją bez automatycznej bramki regresji | RESOLVED | `scripts/check-rust-function-loc.mjs`, `npm run check:loc` oraz wymagany krok CI (maks. 150 linii funkcji) |

@@ -1,7 +1,7 @@
 {
   "name": "skillsync",
   "private": true,
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "A secure, cross-platform desktop manager for discovering, checking, updating, and rolling back AI agent skills.",
   "author": "Tomasz Bołoz <https://www.damtox.pl>",
   "license": "MIT",
@@ -24,6 +24,7 @@
     "build:mac": "python3 scripts/build_release.py --platform macos",
     "build:win": "python3 scripts/build_release.py --platform windows",
     "lint": "eslint src scripts --ext .ts,.tsx,.mjs",
+    "check:loc": "node scripts/check-rust-function-loc.mjs",
     "test:unit": "vitest run",
     "test:coverage": "vitest run --coverage"
   },

@@ -440,10 +440,13 @@ impl ManagedItemDetector {
 
     fn add_location(item: &mut SkillMetadata, path: &Path) {
         let path = path.to_path_buf();
-        let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        let already_present = item.installed_locations.iter().any(|existing| {
-            fs::canonicalize(existing).unwrap_or_else(|_| existing.clone()) == canonical
-        });
+        // Preserve configured aliases as separate visible locations. The
+        // update transaction canonicalizes them before checkout, so this does
+        // not duplicate the physical mutation.
+        let already_present = item
+            .installed_locations
+            .iter()
+            .any(|existing| existing == &path);
         if !already_present {
             item.installed_locations.push(path);
         }

@@ -44,6 +44,9 @@ jobs:
           npm run lint
           npx tsc --noEmit
 
+      - name: Enforce Rust function size limit
+        run: npm run check:loc
+
       - name: Verify Prettier Code Formatting
         run: npx prettier --check "src/**/*.{ts,tsx,css,json}"
 

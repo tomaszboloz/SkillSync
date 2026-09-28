@@ -53,6 +53,22 @@ fn discover_skills() -> Vec<SkillMetadata> {
     let mut skills = SkillDetector::scan_directories(&skill_paths);
     skills.extend(ManagedItemDetector::scan_paths(&paths));
 
+    // Apply repository overrides before identity collapse. A mirrored copy
+    // can lack its own manifest URL while settings explicitly identify the
+    // same upstream as another agent installation.
+    for skill in &mut skills {
+        if let Some(repository) = config.updates.repository_overrides.get(&skill.id) {
+            if let Some(repository) = GitHubService::normalize_github_repository_url(repository) {
+                skill.remote_url = Some(repository);
+            }
+        }
+    }
+
+    // A Git repository is one updateable unit even when it contains a large
+    // suite of nested SKILL.md files. Collapse those manifests before the
+    // result reaches the UI so counts represent update targets, not files.
+    skills = SkillDetector::collapse_git_repositories(skills);
+
     // A missing manifest version can be resolved only from a tag pointing at HEAD.
     for skill in &mut skills {
         skill.current_version = skill
@@ -67,11 +83,6 @@ fn discover_skills() -> Vec<SkillMetadata> {
     }
 
     for skill in &mut skills {
-        if let Some(repository) = config.updates.repository_overrides.get(&skill.id) {
-            if let Some(repository) = GitHubService::normalize_github_repository_url(repository) {
-                skill.remote_url = Some(repository);
-            }
-        }
         if let Some(branch) = config.updates.branch_overrides.get(&skill.id) {
             let branch = branch.trim();
             if GitService::is_valid_branch_name(branch) {
@@ -81,7 +92,28 @@ fn discover_skills() -> Vec<SkillMetadata> {
         }
     }
 
+    // The main list and its counters are intentionally limited to resources
+    // with a verified remote update source. Local manifests without a Git
+    // remote cannot be checked for a new version and must not be presented as
+    // actionable packages.
+    skills.retain(has_update_source);
+    SkillDetector::disambiguate_source_names(&mut skills);
+
     skills
+}
+
+fn has_update_source(skill: &SkillMetadata) -> bool {
+    let Some(remote) = skill.remote_url.as_deref() else {
+        return false;
+    };
+    if remote.trim().is_empty() {
+        return false;
+    }
+
+    // Git can update any authenticated remote. The non-Git manifest adapter
+    // is deliberately narrower: it fetches a raw SKILL.md from GitHub and
+    // therefore must reject documentation/homepage URLs such as gofastmcp.com.
+    skill.is_git_repo || GitHubService::normalize_github_repository_url(remote).is_some()
 }
 
 fn available_locations(skill: &SkillMetadata) -> Vec<PathBuf> {

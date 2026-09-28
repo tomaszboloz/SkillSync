@@ -15,6 +15,194 @@ pub struct SkillDetector;
 pub const UNKNOWN_SKILL_VERSION: &str = "unknown";
 
 impl SkillDetector {
+    /// Collapse nested manifests that belong to one Git worktree into one
+    /// update target. A repository such as `gstack` may contain dozens of
+    /// `SKILL.md` files, but Git can update the worktree only once. Keeping
+    /// every nested manifest as a card inflated the logical resource count
+    /// and made one checkout appear as many independent updates.
+    pub fn collapse_git_repositories(skills: Vec<SkillMetadata>) -> Vec<SkillMetadata> {
+        let mut collapsed = std::collections::HashMap::<String, SkillMetadata>::new();
+
+        for candidate in skills {
+            let repository_root = GitService::repository_root(&candidate.path);
+
+            let source = candidate
+                .remote_url
+                .as_deref()
+                .map(|remote| {
+                    GitHubService::normalize_github_repository_url(remote)
+                        .unwrap_or_else(|| remote.trim().trim_end_matches(".git").to_string())
+                        .to_lowercase()
+                })
+                .unwrap_or_else(|| {
+                    repository_root
+                        .as_ref()
+                        .map(|root| root.to_string_lossy().to_lowercase())
+                        .unwrap_or_else(|| format!("local:{}", collapsed.len()))
+                });
+            let key = if repository_root.is_some() {
+                // One Git worktree is one updateable unit, regardless of how
+                // many nested manifests it contains.
+                format!("git|{:?}|{source}", candidate.item_type)
+            } else if candidate.remote_url.is_some() {
+                // Non-Git raw-manifest adapters are distinct by source and
+                // skill name; copies from several agent directories merge.
+                format!(
+                    "remote|{:?}|{source}|{}",
+                    candidate.item_type,
+                    candidate.id.to_lowercase()
+                )
+            } else {
+                format!("local:{}", collapsed.len())
+            };
+
+            if let Some(existing) = collapsed.get_mut(&key) {
+                Self::merge_git_candidate(existing, candidate);
+            } else {
+                collapsed.insert(key, candidate);
+            }
+        }
+
+        // A mirrored installation may carry the upstream URL only in one
+        // agent's manifest. Attach source-less copies to the single matching
+        // sourced resource by type and name, but never guess when multiple
+        // different repositories expose the same name.
+        let orphan_keys: Vec<_> = collapsed
+            .iter()
+            .filter(|(_, item)| item.remote_url.is_none())
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in orphan_keys {
+            let Some(orphan) = collapsed.remove(&key) else {
+                continue;
+            };
+            let matches: Vec<_> = collapsed
+                .iter()
+                .filter(|(_, item)| {
+                    item.remote_url.is_some()
+                        && item.item_type == orphan.item_type
+                        && item.name.eq_ignore_ascii_case(&orphan.name)
+                })
+                .map(|(key, _)| key.clone())
+                .collect();
+            if matches.len() == 1 {
+                if let Some(existing) = collapsed.get_mut(&matches[0]) {
+                    Self::merge_git_candidate(existing, orphan);
+                }
+            } else {
+                collapsed.insert(key, orphan);
+            }
+        }
+
+        let mut result: Vec<_> = collapsed.into_values().collect();
+        result.sort_by_key(|skill| (skill.name.to_lowercase(), skill.path.clone()));
+        result
+    }
+
+    /// Keep same-named resources from different upstream repositories
+    /// distinguishable in the UI. They are not the same update target and
+    /// must not be merged; a short repository suffix makes that distinction
+    /// explicit without changing stable IDs or update logic.
+    pub fn disambiguate_source_names(skills: &mut [SkillMetadata]) {
+        let mut names = std::collections::HashMap::<String, Vec<usize>>::new();
+        for (index, skill) in skills.iter().enumerate() {
+            if skill.remote_url.is_some() {
+                names
+                    .entry(skill.name.to_lowercase())
+                    .or_default()
+                    .push(index);
+            }
+        }
+
+        for indexes in names.values().filter(|indexes| indexes.len() > 1) {
+            for index in indexes {
+                let suffix = skills[*index]
+                    .remote_url
+                    .as_deref()
+                    .and_then(GitHubService::parse_github_owner_repo)
+                    .map(|(_, repository)| repository)
+                    .unwrap_or_else(|| "source".to_string());
+                skills[*index].name = format!("{} ({suffix})", skills[*index].name);
+            }
+        }
+    }
+
+    fn merge_git_candidate(existing: &mut SkillMetadata, candidate: SkillMetadata) {
+        let candidate_remote = candidate.remote_url.clone();
+        let candidate_path =
+            fs::canonicalize(&candidate.path).unwrap_or_else(|_| candidate.path.clone());
+        let mut locations = existing.installed_locations.clone();
+        locations.push(existing.path.clone());
+        locations.extend(candidate.installed_locations.clone());
+        locations.push(candidate.path.clone());
+
+        // One physical checkout is one installation even when it exposes
+        // many nested manifests. Keep one valid manifest path per worktree;
+        // prefer the path closest to the repository root for stable metadata.
+        let mut by_root = std::collections::HashMap::<(PathBuf, PathBuf), PathBuf>::new();
+        for location in locations {
+            let canonical = fs::canonicalize(&location).unwrap_or(location.clone());
+            let root = GitService::repository_root(&canonical).unwrap_or_else(|| canonical.clone());
+            let alias = Self::repository_alias(&location, &root);
+            let key = (root.clone(), alias);
+            let replace = by_root.get(&key).is_none_or(|current| {
+                Self::manifest_path_rank(&canonical, &root)
+                    < Self::manifest_path_rank(
+                        &fs::canonicalize(current).unwrap_or_else(|_| current.clone()),
+                        &root,
+                    )
+            });
+            if replace {
+                by_root.insert(key, location);
+            }
+        }
+
+        let candidate_is_better = by_root.values().any(|path| {
+            fs::canonicalize(path).unwrap_or_else(|_| path.clone()) == candidate_path
+                && Self::manifest_path_rank(
+                    &fs::canonicalize(path).unwrap_or_else(|_| path.clone()),
+                    &GitService::repository_root(path).unwrap_or_else(|| path.clone()),
+                ) < Self::manifest_path_rank(
+                    &fs::canonicalize(&existing.path).unwrap_or_else(|_| existing.path.clone()),
+                    &GitService::repository_root(&existing.path)
+                        .unwrap_or_else(|| existing.path.clone()),
+                )
+        });
+        let mut merged_locations: Vec<_> = by_root.into_values().collect();
+        merged_locations.sort();
+        if candidate_is_better {
+            let mut replacement = candidate;
+            replacement.installed_locations = merged_locations;
+            *existing = replacement;
+        } else {
+            existing.installed_locations = merged_locations;
+        }
+        if existing.remote_url.is_none() {
+            existing.remote_url = candidate_remote;
+        }
+    }
+
+    fn repository_alias(path: &Path, root: &Path) -> PathBuf {
+        let mut alias = path.to_path_buf();
+        while let Some(parent) = alias.parent() {
+            let parent_root = GitService::repository_root(parent);
+            if parent_root.as_deref() == Some(root) {
+                alias = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+        alias
+    }
+
+    fn manifest_path_rank(path: &Path, root: &Path) -> (usize, String) {
+        let depth = path
+            .strip_prefix(root)
+            .map(|relative| relative.components().count())
+            .unwrap_or(usize::MAX);
+        (depth, path.to_string_lossy().to_lowercase())
+    }
+
     pub fn scan_directories(paths: &[PathBuf]) -> Vec<SkillMetadata> {
         let mut skills_map: std::collections::HashMap<String, SkillMetadata> =
             std::collections::HashMap::new();
@@ -143,10 +331,9 @@ impl SkillDetector {
     }
 
     fn contains_same_path(paths: &[PathBuf], candidate: &Path) -> bool {
-        let candidate = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
-        paths
-            .iter()
-            .any(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()) == candidate)
+        // Keep distinct configured aliases (for example Claude and Codex
+        // symlinks) visible. Exact lexical duplicates are still ignored.
+        paths.iter().any(|path| path == candidate)
     }
 
     /// Preserve legacy IDs while a name has one upstream. If same-named
@@ -210,193 +397,122 @@ impl SkillDetector {
     }
 
     fn inspect_candidate_directory(dir: &Path, base_monitored: &Path) -> Option<SkillMetadata> {
-        let skill_json = dir.join("skill.json");
-        let skill_md = dir.join("SKILL.md");
-        let package_json = dir.join("package.json");
-
         let folder_name = dir.file_name()?.to_string_lossy().to_string();
-
-        // 1. Check skill.json
-        if skill_json.exists() {
-            if let Ok(content) = fs::read_to_string(&skill_json) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                    let name = v
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or(&folder_name)
-                        .to_string();
-                    let manifest_version = v
-                        .get("version")
-                        .and_then(|ver| ver.as_str())
-                        .map(str::to_string);
-                    let desc = v
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let author = v
-                        .get("author")
-                        .and_then(|a| a.as_str())
-                        .unwrap_or("Unknown")
-                        .to_string();
-                    let scope =
-                        Self::infer_scope(v.get("scope").and_then(|s| s.as_str()), base_monitored);
-
-                    let is_git = GitService::is_git_repository(dir);
-                    let version = Self::resolved_local_version(dir, manifest_version);
-                    let fm_dummy = FrontmatterMeta::default();
-                    let remote_url = Self::resolve_remote_url(dir, &fm_dummy);
-                    let branch_or_tag = GitService::get_current_ref_name(dir);
-                    let compatibility = Self::infer_compatibility(dir, &scope, &fm_dummy);
-
-                    return Some(SkillMetadata {
-                        item_type: crate::models::skill::ManagedItemType::Skill,
-                        id: format!("skill-{}", name.replace(' ', "-").to_lowercase()),
-                        name,
-                        description: desc,
-                        current_version: version,
-                        latest_version: None,
-                        author,
-                        path: dir.to_path_buf(),
-                        is_git_repo: is_git,
-                        remote_url,
-                        branch_or_tag,
-                        detected_branch: GitService::get_current_branch_name(dir),
-                        branch_override: None,
-                        agent_scope: scope,
-                        status: SkillStatus::UpToDate,
-                        update_available: false,
-                        changelog: None,
-                        dependencies: vec![],
-                        permissions: vec![],
-                        last_checked: chrono::Utc::now(),
-                        compatibility: Some(compatibility),
-                        update_compatibility: None,
-                        installed_locations: vec![dir.to_path_buf()],
-                    });
-                }
-            }
+        let skill_json_path = dir.join("skill.json");
+        if skill_json_path.exists() {
+            let value = Self::read_json_manifest(&skill_json_path)?;
+            let name = Self::json_string(&value, "name").unwrap_or(folder_name.clone());
+            let version = Self::json_string(&value, "version");
+            let description = Self::json_string(&value, "description").unwrap_or_default();
+            let author = Self::json_string(&value, "author").unwrap_or_else(|| "Unknown".into());
+            let scope = Self::infer_scope(
+                value.get("scope").and_then(|scope| scope.as_str()),
+                base_monitored,
+            );
+            return Some(Self::build_metadata(
+                dir,
+                name,
+                description,
+                author,
+                version,
+                scope,
+                FrontmatterMeta::default(),
+            ));
         }
 
-        // 2. Check SKILL.md with YAML frontmatter
-        if skill_md.exists() {
-            let fm = if let Ok(content) = fs::read_to_string(&skill_md) {
-                Self::parse_yaml_frontmatter(&content)
-            } else {
-                FrontmatterMeta::default()
-            };
-
-            let name = fm.name.clone().unwrap_or_else(|| folder_name.clone());
-            let desc = fm
+        if let Ok(content) = fs::read_to_string(dir.join("SKILL.md")) {
+            let fm = Self::parse_yaml_frontmatter(&content);
+            let name = fm.name.clone().unwrap_or(folder_name.clone());
+            let description = fm
                 .description
                 .clone()
-                .unwrap_or_else(|| "Skill with Markdown documentation".to_string());
-            let author = fm.author.clone().unwrap_or_else(|| "Community".to_string());
+                .unwrap_or_else(|| "Skill with Markdown documentation".into());
+            let author = fm.author.clone().unwrap_or_else(|| "Community".into());
             let scope = Self::infer_scope(fm.scope.as_deref(), base_monitored);
-
-            let is_git = GitService::is_git_repository(dir);
-            let remote_url = Self::resolve_remote_url(dir, &fm);
-            let branch_or_tag = GitService::get_current_ref_name(dir);
-            let compatibility = Self::infer_compatibility(dir, &scope, &fm);
-
-            // A checked-out SemVer tag is the source of truth for every
-            // Git-managed update. A nested manifest can legitimately retain
-            // its older per-skill version while the repository is at a newer
-            // release tag; treating that metadata as newer caused a false
-            // update to reappear after the next scan.
-            let version = Self::resolved_local_version(dir, fm.version.clone());
-
-            return Some(SkillMetadata {
-                item_type: crate::models::skill::ManagedItemType::Skill,
-                id: format!("skill-{}", name.replace(' ', "-").to_lowercase()),
+            return Some(Self::build_metadata(
+                dir,
                 name,
-                description: desc,
-                current_version: version,
-                latest_version: None,
+                description,
                 author,
-                path: dir.to_path_buf(),
-                is_git_repo: is_git,
-                remote_url,
-                branch_or_tag,
-                detected_branch: GitService::get_current_branch_name(dir),
-                branch_override: None,
-                agent_scope: scope,
-                status: SkillStatus::UpToDate,
-                update_available: false,
-                changelog: None,
-                dependencies: vec![],
-                permissions: vec![],
-                last_checked: chrono::Utc::now(),
-                compatibility: Some(compatibility),
-                update_compatibility: None,
-                installed_locations: vec![dir.to_path_buf()],
-            });
+                fm.version.clone(),
+                scope,
+                fm,
+            ));
         }
 
-        // 3. Check package.json
-        if package_json.exists() {
-            if let Ok(content) = fs::read_to_string(&package_json) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if SkillManifest::is_explicit_package_skill(dir) {
-                        let name = v
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or(&folder_name)
-                            .to_string();
-                        let manifest_version = v
-                            .get("version")
-                            .and_then(|ver| ver.as_str())
-                            .map(|version| version.trim_start_matches(['v', 'V']).to_string());
-                        let desc = v
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or("Node-based AI skill")
-                            .to_string();
-                        let author = v
-                            .get("author")
-                            .and_then(|a| a.as_str())
-                            .unwrap_or("Unknown")
-                            .to_string();
-                        let scope = Self::infer_scope(None, base_monitored);
-
-                        let is_git = GitService::is_git_repository(dir);
-                        let version = Self::resolved_local_version(dir, manifest_version);
-                        let fm_dummy = FrontmatterMeta::default();
-                        let remote_url = Self::resolve_remote_url(dir, &fm_dummy);
-                        let branch_or_tag = GitService::get_current_ref_name(dir);
-                        let compatibility = Self::infer_compatibility(dir, &scope, &fm_dummy);
-
-                        return Some(SkillMetadata {
-                            item_type: crate::models::skill::ManagedItemType::Skill,
-                            id: format!("skill-{}", name.replace(' ', "-").to_lowercase()),
-                            name,
-                            description: desc,
-                            current_version: version,
-                            latest_version: None,
-                            author,
-                            path: dir.to_path_buf(),
-                            is_git_repo: is_git,
-                            remote_url,
-                            branch_or_tag,
-                            detected_branch: GitService::get_current_branch_name(dir),
-                            branch_override: None,
-                            agent_scope: scope,
-                            status: SkillStatus::UpToDate,
-                            update_available: false,
-                            changelog: None,
-                            dependencies: vec![],
-                            permissions: vec![],
-                            last_checked: chrono::Utc::now(),
-                            compatibility: Some(compatibility),
-                            update_compatibility: None,
-                            installed_locations: vec![dir.to_path_buf()],
-                        });
-                    }
-                }
-            }
+        let package = Self::read_json_manifest(&dir.join("package.json"))?;
+        if !SkillManifest::is_explicit_package_skill(dir) {
+            return None;
         }
+        let name = Self::json_string(&package, "name").unwrap_or(folder_name);
+        let version = Self::json_string(&package, "version")
+            .map(|value| value.trim_start_matches(['v', 'V']).to_string());
+        let description = Self::json_string(&package, "description")
+            .unwrap_or_else(|| "Node-based AI skill".into());
+        let author = Self::json_string(&package, "author").unwrap_or_else(|| "Unknown".into());
+        let scope = Self::infer_scope(None, base_monitored);
+        Some(Self::build_metadata(
+            dir,
+            name,
+            description,
+            author,
+            version,
+            scope,
+            FrontmatterMeta::default(),
+        ))
+    }
 
-        None
+    fn read_json_manifest(path: &Path) -> Option<serde_json::Value> {
+        let content = fs::read_to_string(path).ok()?;
+        serde_json::from_str(&content).ok()
+    }
+
+    fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+        value
+            .get(key)
+            .and_then(|entry| entry.as_str())
+            .map(str::to_string)
+    }
+
+    fn build_metadata(
+        dir: &Path,
+        name: String,
+        description: String,
+        author: String,
+        manifest_version: Option<String>,
+        scope: AgentScope,
+        fm: FrontmatterMeta,
+    ) -> SkillMetadata {
+        let is_git = GitService::is_git_repository(dir);
+        let current_version = Self::resolved_local_version(dir, manifest_version);
+        let remote_url = Self::resolve_remote_url(dir, &fm);
+        let branch_or_tag = GitService::get_current_ref_name(dir);
+        let compatibility = Self::infer_compatibility(dir, &scope, &fm);
+        SkillMetadata {
+            item_type: crate::models::skill::ManagedItemType::Skill,
+            id: format!("skill-{}", name.replace(' ', "-").to_lowercase()),
+            name,
+            description,
+            current_version,
+            latest_version: None,
+            author,
+            path: dir.to_path_buf(),
+            is_git_repo: is_git,
+            remote_url,
+            branch_or_tag,
+            detected_branch: GitService::get_current_branch_name(dir),
+            branch_override: None,
+            agent_scope: scope,
+            status: SkillStatus::UpToDate,
+            update_available: false,
+            changelog: None,
+            dependencies: vec![],
+            permissions: vec![],
+            last_checked: chrono::Utc::now(),
+            compatibility: Some(compatibility),
+            update_compatibility: None,
+            installed_locations: vec![dir.to_path_buf()],
+        }
     }
 
     fn infer_scope(manifest_scope: Option<&str>, base_path: &Path) -> AgentScope {
@@ -836,6 +952,92 @@ metadata:
     }
 
     #[test]
+    fn collapses_many_nested_manifests_to_one_git_update_target() {
+        let root = fixture_root("collapse-git-suite");
+        let skills_root = root.join("skills");
+        for name in ["first", "second", "third"] {
+            write_file(
+                &skills_root.join(name).join("SKILL.md"),
+                &format!("---\nname: {name}\n---\n# Skill\n"),
+            );
+        }
+
+        let repo = git2::Repository::init(&root).unwrap();
+        repo.remote("origin", "https://github.com/example/suite")
+            .unwrap();
+        let skills = SkillDetector::scan_directories(&[skills_root]);
+        assert_eq!(skills.len(), 3);
+
+        let collapsed = SkillDetector::collapse_git_repositories(skills);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].installed_locations.len(), 1);
+        assert_eq!(
+            collapsed[0].remote_url.as_deref(),
+            Some("https://github.com/example/suite")
+        );
+
+        let mut duplicates = vec![collapsed[0].clone()];
+        let mut other = collapsed[0].clone();
+        other.remote_url = Some("https://github.com/example/other-suite".to_string());
+        duplicates.push(other);
+        SkillDetector::disambiguate_source_names(&mut duplicates);
+        assert_ne!(duplicates[0].name, duplicates[1].name);
+        assert!(duplicates[0].name.contains("(suite)"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn attaches_a_source_less_agent_copy_to_the_single_matching_upstream() {
+        let root = fixture_root("cross-agent-copy");
+        let sourced = root.join("codex/source");
+        let mirrored = root.join("claude/mirror");
+        write_file(
+            &sourced.join("SKILL.md"),
+            "---\nname: shared-agent-skill\nversion: 1.0.0\n---\n# Skill\n",
+        );
+        write_file(
+            &mirrored.join("SKILL.md"),
+            "---\nname: shared-agent-skill\nversion: 1.0.0\n---\n# Skill\n",
+        );
+        let repo = git2::Repository::init(root.join("codex")).unwrap();
+        repo.remote("origin", "https://github.com/example/shared-agent-skill")
+            .unwrap();
+
+        let scanned = SkillDetector::scan_directories(&[root.join("codex"), root.join("claude")]);
+        let collapsed = SkillDetector::collapse_git_repositories(scanned);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].installed_locations.len(), 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_distinct_agent_symlink_aliases_as_locations() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture_root("cross-agent-symlink");
+        let central = root.join("central");
+        let alias = root.join("claude");
+        write_file(
+            &central.join("skill/SKILL.md"),
+            "---\nname: aliased-skill\n---\n# Skill\n",
+        );
+        let repo = git2::Repository::init(&central).unwrap();
+        repo.remote("origin", "https://github.com/example/aliased-skill")
+            .unwrap();
+        symlink(&central, &alias).unwrap();
+
+        let scanned = SkillDetector::scan_directories(&[central.clone(), alias]);
+        let collapsed = SkillDetector::collapse_git_repositories(scanned);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].installed_locations.len(), 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn discovers_skills_nested_in_a_claude_marketplace_repository() {
         let root = fixture_root("claude-marketplace");
         let marketplace = root.join("Lex-Machina/.claude/skills/prawny-router-v3");
@@ -888,6 +1090,46 @@ metadata:
         assert!(skills.iter().all(|skill| skill.name == "seo-audit"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disambiguates_same_named_non_git_github_manifests() {
+        let first = SkillMetadata {
+            item_type: crate::models::skill::ManagedItemType::Skill,
+            id: "skill-seo-audit".to_string(),
+            name: "seo-audit".to_string(),
+            description: String::new(),
+            current_version: "1.0.0".to_string(),
+            latest_version: None,
+            author: "Community".to_string(),
+            path: PathBuf::from("/tmp/first"),
+            is_git_repo: false,
+            remote_url: Some("https://github.com/coreyhaines31/marketingskills".to_string()),
+            branch_or_tag: None,
+            detected_branch: None,
+            branch_override: None,
+            agent_scope: AgentScope::Global,
+            status: SkillStatus::UpToDate,
+            update_available: false,
+            changelog: None,
+            dependencies: vec![],
+            permissions: vec![],
+            last_checked: chrono::Utc::now(),
+            compatibility: None,
+            update_compatibility: None,
+            installed_locations: vec![PathBuf::from("/tmp/first")],
+        };
+        let mut second = first.clone();
+        second.path = PathBuf::from("/tmp/second");
+        second.installed_locations = vec![second.path.clone()];
+        second.remote_url = Some("https://github.com/AgriciDaniel/claude-seo".to_string());
+
+        let mut resources = vec![first, second];
+        SkillDetector::disambiguate_source_names(&mut resources);
+
+        assert_eq!(resources.len(), 2);
+        assert_ne!(resources[0].name, resources[1].name);
+        assert!(resources.iter().all(|resource| resource.name.contains('(')));
     }
 
     #[test]
