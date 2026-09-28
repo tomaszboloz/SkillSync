@@ -2,6 +2,7 @@ use crate::models::config::{MonitoredPath, MonitoredPathType};
 use crate::models::skill::{AgentScope, ManagedItemType, SkillMetadata, SkillStatus};
 use crate::services::claude_plugin::ClaudePluginService;
 use crate::services::codex_plugin::CodexPluginService;
+use crate::services::discovery::local_manifest_identity;
 use crate::services::git::GitService;
 use crate::services::github::GitHubService;
 use crate::services::managed_manifest::{ManagedManifest, ManagedManifestKind};
@@ -105,8 +106,10 @@ impl ManagedItemDetector {
             .as_deref()
             .and_then(GitHubService::normalize_github_repository_url)
             .unwrap_or_else(|| {
-                let canonical = fs::canonicalize(&item.path).unwrap_or_else(|_| item.path.clone());
-                format!("local:{}", canonical.to_string_lossy().to_lowercase())
+                format!(
+                    "local:{}",
+                    local_manifest_identity(&item.path, &item.item_type)
+                )
             });
         format!("{}|{}", item.id, source.to_lowercase())
     }

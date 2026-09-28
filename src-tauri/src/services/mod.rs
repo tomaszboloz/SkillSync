@@ -3,6 +3,7 @@ pub mod claude_plugin;
 pub mod codex_plugin;
 pub mod config;
 pub mod detector;
+pub mod discovery;
 pub mod git;
 pub mod github;
 pub mod managed_detector;

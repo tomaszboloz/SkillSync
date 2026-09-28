@@ -315,7 +315,7 @@ export const api = {
         skillId,
         createdAt: new Date(Date.now() - 3600000).toISOString(),
         backupFilePath: `~/.skillsync/backups/${skillId}_pre_update.tar.gz`,
-        originalVersion: "1.4.2",
+        originalVersion: "1.4.3",
       },
     ];
   },

@@ -2,6 +2,22 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [1.4.3] - 2026-09-28
+
+### Fixed
+
+- Identical local manifests without a resolvable upstream URL are now grouped
+  into one logical resource across Claude, Codex, Cursor, Gemini and Agents
+  paths. Their physical locations remain visible and update-safe.
+- Different manifest contents, item types, or repositories remain independent;
+  deduplication cannot merge unrelated packages merely because their names
+  match.
+
+### Verification
+
+- The verified local account is now **534 logical resources** instead of 679:
+  477 Skills, 57 Plugins and 0 MCP, backed by 734 physical installations.
+
 ## [1.4.2] - 2026-09-28
 
 ### Fixed
@@ -226,4 +242,5 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 [1.4.0]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.0
 [1.4.1]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.1
 [1.4.2]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.2
+[1.4.3]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.3
 [1.3.1]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.3.1

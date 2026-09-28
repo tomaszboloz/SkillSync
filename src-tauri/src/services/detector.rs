@@ -1,5 +1,6 @@
 use crate::models::skill::{AgentScope, SkillMetadata, SkillStatus};
 use crate::services::codex_plugin::CodexPluginService;
+use crate::services::discovery::local_manifest_identity;
 use crate::services::git::GitService;
 use crate::services::github::GitHubService;
 use crate::services::manifest::SkillManifest;
@@ -133,9 +134,10 @@ impl SkillDetector {
                     .to_lowercase()
             })
             .unwrap_or_else(|| {
-                let canonical =
-                    fs::canonicalize(&skill.path).unwrap_or_else(|_| skill.path.clone());
-                format!("local:{}", canonical.to_string_lossy().to_lowercase())
+                format!(
+                    "local:{}",
+                    local_manifest_identity(&skill.path, &skill.item_type)
+                )
             });
         format!("{}|{}", skill.id, source)
     }
@@ -1037,7 +1039,7 @@ metadata:
     }
 
     #[test]
-    fn keeps_same_named_local_skills_separate_when_they_have_no_upstream() {
+    fn merges_identical_same_named_local_skills_without_an_upstream() {
         let root = fixture_root("local-identity");
         for folder in ["first", "second"] {
             write_file(
@@ -1047,8 +1049,9 @@ metadata:
         }
 
         let skills = SkillDetector::scan_directories(std::slice::from_ref(&root));
-        assert_eq!(skills.len(), 2);
+        assert_eq!(skills.len(), 1);
         assert!(skills.iter().all(|skill| skill.remote_url.is_none()));
+        assert_eq!(skills[0].installed_locations.len(), 2);
 
         let _ = fs::remove_dir_all(root);
     }
