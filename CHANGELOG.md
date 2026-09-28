@@ -2,6 +2,29 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] - 2026-09-28
+
+### Added
+
+- Add an owner-safe Codex plugin adapter: active marketplace plugins are
+  refreshed only through `codex plugin marketplace upgrade` and `codex plugin
+  add`, then checked for a valid manifest.
+
+### Fixed
+
+- Ignore immutable, historical Codex cache directories such as
+  `~/.codex/plugins/cache/openai-curated/*`; they are not Git repositories and
+  cannot be updated safely by SkillSync.
+- Ignore uninstalled entries in the Codex marketplace catalog while retaining
+  active entries from the authoritative Codex registry.
+- Deduplicate local resources by canonical path and keep same-named resources
+  from different sources independent.
+
+### Security
+
+- Codex plugin updates no longer copy cache files or execute package-provided
+  scripts; the owning CLI remains the only update authority.
+
 ## [1.4.0] - 2026-09-28
 
 ### Added
@@ -184,4 +207,5 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 [1.2.9]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.2.9
 [1.3.0]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.3.0
 [1.4.0]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.0
+[1.4.1]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.1
 [1.3.1]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.3.1

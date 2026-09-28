@@ -95,3 +95,12 @@ upstreamu ani nie zastępuje testów środowiskowych na macOS i Windows.
 | GAP-069 | Branch ref przyjmował niebezpieczne separatory | RESOLVED | testy `//`, `/feature`, URL |
 | GAP-070 | Zmiana wersji nie miała jawnego zakresu rollbacku | RESOLVED | snapshoty planowane przed mutacją |
 
+## Codex registry and resource accounting
+
+| ID | GAP | Status | Dowód |
+| --- | --- | --- | --- |
+| GAP-071 | Historyczny Codex cache był traktowany jak repozytorium Git | RESOLVED | `CodexPluginService`, filtr `~/.codex/plugins/cache` |
+| GAP-072 | Aktualizacje Codex pluginów nie miały właścicielskiego adaptera | RESOLVED | `codex plugin marketplace upgrade` + `codex plugin add`, test JSON registry |
+| GAP-073 | Katalog marketplace zawierał niezainstalowane pluginy liczone jako zasoby | RESOLVED | filtr aktywnych ścieżek z `codex plugin list --available --json` |
+| GAP-074 | Symlink/canonical path mógł zawyżać liczbę lokalizacji | RESOLVED | deduplikacja canonical path w detectorach |
+| GAP-075 | Brakowało rozdzielenia identycznej nazwy od identycznego źródła | RESOLVED | klucz discovery `name/id + normalized source`, testy różnych repozytoriów |

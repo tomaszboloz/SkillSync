@@ -176,6 +176,14 @@ impl PathsConfig {
             (home.join(".gemini/config/plugins"), "antigravity"),
             (home.join(".claude/plugins"), "claude"),
             (home.join(".codex/plugins"), "codex"),
+            // Current Codex marketplace installations live in the managed
+            // snapshot root below `.tmp`; the legacy `plugins/cache` tree is
+            // handled as immutable history by the Codex adapter.
+            (home.join(".codex/.tmp/plugins"), "codex"),
+            (
+                home.join(".cache/codex-runtimes/codex-primary-runtime/plugins"),
+                "codex",
+            ),
         ];
 
         for (root, scope) in plugin_roots {

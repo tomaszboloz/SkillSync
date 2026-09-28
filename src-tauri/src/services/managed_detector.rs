@@ -1,6 +1,7 @@
 use crate::models::config::{MonitoredPath, MonitoredPathType};
 use crate::models::skill::{AgentScope, ManagedItemType, SkillMetadata, SkillStatus};
 use crate::services::claude_plugin::ClaudePluginService;
+use crate::services::codex_plugin::CodexPluginService;
 use crate::services::git::GitService;
 use crate::services::github::GitHubService;
 use crate::services::managed_manifest::{ManagedManifest, ManagedManifestKind};
@@ -17,6 +18,16 @@ pub struct ManagedItemDetector;
 impl ManagedItemDetector {
     pub fn scan_paths(paths: &[MonitoredPath]) -> Vec<SkillMetadata> {
         let mut items = HashMap::<String, SkillMetadata>::new();
+        let codex_root = dirs::home_dir().map(|home| home.join(".codex"));
+        let codex_installations = if codex_root.as_ref().is_some_and(|root| {
+            paths
+                .iter()
+                .any(|monitored| monitored.path.starts_with(root))
+        }) {
+            CodexPluginService::active_installations()
+        } else {
+            Vec::new()
+        };
 
         for monitored in paths
             .iter()
@@ -39,6 +50,19 @@ impl ManagedItemDetector {
                     continue;
                 }
                 let path = entry.path();
+                if CodexPluginService::is_legacy_cache_path(path) {
+                    entries.skip_current_dir();
+                    continue;
+                }
+                if CodexPluginService::is_inactive_cache_path(path) {
+                    entries.skip_current_dir();
+                    continue;
+                }
+                if CodexPluginService::is_uninstalled_marketplace_entry(path, &codex_installations)
+                {
+                    entries.skip_current_dir();
+                    continue;
+                }
                 // Claude Code retains older cache versions after an update.
                 // Only its installed_plugins.json registry may select the
                 // active cache entry; displaying stale versions leads to a
@@ -85,12 +109,8 @@ impl ManagedItemDetector {
             .as_deref()
             .and_then(GitHubService::normalize_github_repository_url)
             .unwrap_or_else(|| {
-                item.remote_url
-                    .as_deref()
-                    .unwrap_or("local")
-                    .trim()
-                    .trim_end_matches(".git")
-                    .to_lowercase()
+                let canonical = fs::canonicalize(&item.path).unwrap_or_else(|_| item.path.clone());
+                format!("local:{}", canonical.to_string_lossy().to_lowercase())
             });
         format!("{}|{}", item.id, source.to_lowercase())
     }
@@ -421,7 +441,11 @@ impl ManagedItemDetector {
 
     fn add_location(item: &mut SkillMetadata, path: &Path) {
         let path = path.to_path_buf();
-        if !item.installed_locations.contains(&path) {
+        let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let already_present = item.installed_locations.iter().any(|existing| {
+            fs::canonicalize(existing).unwrap_or_else(|_| existing.clone()) == canonical
+        });
+        if !already_present {
             item.installed_locations.push(path);
         }
     }

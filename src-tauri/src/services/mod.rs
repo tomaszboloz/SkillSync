@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod claude_plugin;
+pub mod codex_plugin;
 pub mod config;
 pub mod detector;
 pub mod git;

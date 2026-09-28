@@ -1,4 +1,5 @@
 use crate::models::skill::{AgentScope, SkillMetadata, SkillStatus};
+use crate::services::codex_plugin::CodexPluginService;
 use crate::services::git::GitService;
 use crate::services::github::GitHubService;
 use crate::services::manifest::SkillManifest;
@@ -19,6 +20,13 @@ impl SkillDetector {
 
         for base_path in paths {
             if !base_path.exists() {
+                continue;
+            }
+            // Codex keeps immutable historical snapshots below
+            // `~/.codex/plugins/cache`. The active plugin owner is the Codex
+            // registry/CLI; a cache snapshot without an active registry entry
+            // must not become a second install or an update target.
+            if CodexPluginService::is_inactive_cache_path(base_path) {
                 continue;
             }
 
@@ -44,6 +52,10 @@ impl SkillDetector {
                 }
                 let p = entry.path();
                 if entry.file_type().is_dir() {
+                    if CodexPluginService::is_inactive_cache_path(p) {
+                        entries.skip_current_dir();
+                        continue;
+                    }
                     if let Some(candidate) = Self::inspect_candidate_directory(p, base_path) {
                         // A matching display name does not prove two installs
                         // are the same product: e.g. `seo-audit` from
@@ -53,7 +65,7 @@ impl SkillDetector {
                         let key = Self::discovery_key(&candidate);
 
                         if let Some(existing) = skills_map.get_mut(&key) {
-                            if !existing.installed_locations.contains(&p.to_path_buf()) {
+                            if !Self::contains_same_path(&existing.installed_locations, p) {
                                 existing.installed_locations.push(p.to_path_buf());
                             }
                             if existing.agent_scope != candidate.agent_scope
@@ -98,8 +110,19 @@ impl SkillDetector {
                     .unwrap_or_else(|| remote.trim().trim_end_matches(".git").to_string())
                     .to_lowercase()
             })
-            .unwrap_or_else(|| "local".to_string());
+            .unwrap_or_else(|| {
+                let canonical =
+                    fs::canonicalize(&skill.path).unwrap_or_else(|_| skill.path.clone());
+                format!("local:{}", canonical.to_string_lossy().to_lowercase())
+            });
         format!("{}|{}", skill.id, source)
+    }
+
+    fn contains_same_path(paths: &[PathBuf], candidate: &Path) -> bool {
+        let candidate = fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+        paths
+            .iter()
+            .any(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()) == candidate)
     }
 
     /// Preserve legacy IDs while a name has one upstream. If same-named
@@ -987,6 +1010,23 @@ metadata:
 
         let skills = SkillDetector::scan_directories(&[skills_root]);
         assert!(skills.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn keeps_same_named_local_skills_separate_when_they_have_no_upstream() {
+        let root = fixture_root("local-identity");
+        for folder in ["first", "second"] {
+            write_file(
+                &root.join(folder).join("SKILL.md"),
+                "---\nname: shared-local\n---\n# Skill\n",
+            );
+        }
+
+        let skills = SkillDetector::scan_directories(std::slice::from_ref(&root));
+        assert_eq!(skills.len(), 2);
+        assert!(skills.iter().all(|skill| skill.remote_url.is_none()));
 
         let _ = fs::remove_dir_all(root);
     }

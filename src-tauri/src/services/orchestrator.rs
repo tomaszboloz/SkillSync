@@ -3,6 +3,7 @@ use crate::models::skill::ManagedItemType;
 use crate::models::skill::{SkillMetadata, SkillStatus};
 use crate::services::backup::BackupService;
 use crate::services::claude_plugin::ClaudePluginService;
+use crate::services::codex_plugin::CodexPluginService;
 use crate::services::detector::SkillDetector;
 use crate::services::git::GitService;
 use crate::services::github::GitHubService;
@@ -128,7 +129,8 @@ impl UpdateOrchestrator {
                 || (skill.item_type == ManagedItemType::Plugin
                     && manifest == ManagedManifestKind::Plugin
                     && (ClaudePluginService::installation_for_path(target).is_some()
-                        || ClaudePluginService::marketplace_for_path(target).is_some()));
+                        || ClaudePluginService::marketplace_for_path(target).is_some()
+                        || CodexPluginService::installation_for_path(target).is_some()));
             if !GitService::is_git_repository(target)
                 && skill.item_type != ManagedItemType::Skill
                 && !safe_adapter
@@ -268,6 +270,32 @@ impl UpdateOrchestrator {
                     ClaudePluginService::plugin_version(&locations[0]).ok_or_else(|| {
                         SkillSyncError::IntegrityCheckFailed(format!(
                             "Claude Code nie podał wersji marketplace po aktualizacji w {}",
+                            locations[0].display()
+                        ))
+                    })?;
+                verification_targets = locations.clone();
+                resolved_locations = Some(locations);
+                resolved_version = Some(version);
+            // Codex owns its marketplace/cache layout. Never update a Codex
+            // plugin by copying files or checking out Git; delegate to the
+            // official CLI and verify the resulting active manifest.
+            } else if skill.item_type == ManagedItemType::Plugin
+                && manifest == ManagedManifestKind::Plugin
+                && CodexPluginService::installation_for_path(logical_target).is_some()
+            {
+                let locations = match CodexPluginService::update(logical_target) {
+                    Ok(locations) => locations,
+                    Err(error) => {
+                        for (t, snap) in &snapshots {
+                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                        }
+                        return Err(error);
+                    }
+                };
+                let version =
+                    CodexPluginService::plugin_version(&locations[0]).ok_or_else(|| {
+                        SkillSyncError::IntegrityCheckFailed(format!(
+                            "Codex nie pozostawił wersji w manifeście pluginu po aktualizacji w {}",
                             locations[0].display()
                         ))
                     })?;
