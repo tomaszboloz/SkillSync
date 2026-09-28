@@ -2,6 +2,11 @@
 
 > SkillSync is a desktop **skill management tool** that helps you **update skills**, track versions, and safely sync prompt skills across AI agent projects.
 
+> **v1.4.0:** nested Claude marketplaces such as Lex-Machina are discovered,
+> registered marketplace updates use the official Claude Code CLI, and
+> same-named resources from different repositories stay isolated. See the
+> evidence-backed [GAP register](docs/GAP_REGISTER.md).
+
 > If SkillSync saves you time, please give the project a GitHub star ⭐ and share it on social media. It helps other Claude Code, Codex, Cursor, and Gemini users find a safer way to update skills.
 
 [![CI / CD Build Pipeline](https://img.shields.io/github/actions/workflow/status/tomaszboloz/SkillSync/ci.yml?branch=main&style=for-the-badge&logo=github-actions&logoColor=white&label=CI%2FCD)](https://github.com/tomaszboloz/SkillSync/actions)

@@ -2,6 +2,37 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-09-28
+
+### Added
+
+- Discover skills nested in Claude marketplace repositories, including the
+  `.claude/skills` layout used by Lex-Machina.
+- Update registered Claude Code marketplaces through the official
+  `claude plugin marketplace update` adapter, with registry and manifest
+  verification.
+- Add a 70-item, evidence-backed quality GAP register in
+  `docs/GAP_REGISTER.md`.
+
+### Fixed
+
+- Keep same-named skills and plugins from different GitHub repositories as
+  independent resources instead of merging their locations into one unsafe
+  transaction. This prevents `seo-audit` installations from rolling back due
+  to unrelated release lines.
+- Resolve one release tag per upstream remote before a multi-location update,
+  normalize `v` prefixes during final integrity checks, and roll back on any
+  upstream manifest fetch or write failure.
+- Preserve unique snapshot IDs at nanosecond precision and harden external URL
+  opening on Windows and other platforms.
+
+### Security
+
+- Marketplace and plugin updates are delegated only to the Claude Code CLI
+  after registry ownership is proven; arbitrary scripts and non-registered
+  directories remain unsupported.
+
+
 ## [1.3.1] - 2026-09-23
 
 ### Fixed
@@ -152,4 +183,5 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 [1.2.8]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.2.8
 [1.2.9]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.2.9
 [1.3.0]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.3.0
+[1.4.0]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.4.0
 [1.3.1]: https://github.com/tomaszboloz/SkillSync/releases/tag/v1.3.1

@@ -47,7 +47,13 @@ impl BackupService {
         tar.append_dir_all(".", skill_path)?;
         tar.finish()?;
 
-        let snap_id = format!("snap-{}", timestamp.timestamp());
+        // The archive filename already carries nanoseconds; the public ID must
+        // use the same precision so two locations snapshotted in one second
+        // cannot accidentally select each other's rollback entry.
+        let snap_id = format!(
+            "snap-{}",
+            timestamp.timestamp_nanos_opt().unwrap_or_default()
+        );
 
         // Write metadata JSON sidecar file for exact version and timestamp persistence
         let meta_file = backup_dir.join(format!("{}.meta.json", filename));
@@ -303,6 +309,7 @@ mod tests {
             first_snapshot.backup_file_path,
             second_snapshot.backup_file_path
         );
+        assert_ne!(first_snapshot.snapshot_id, second_snapshot.snapshot_id);
         for (root, snapshot) in [(&first, first_snapshot), (&second, second_snapshot)] {
             let _ = fs::remove_dir_all(root);
             let sidecar = snapshot.backup_file_path.with_file_name(format!(

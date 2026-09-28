@@ -1,5 +1,6 @@
 use crate::models::skill::{AgentScope, SkillMetadata, SkillStatus};
 use crate::services::git::GitService;
+use crate::services::github::GitHubService;
 use crate::services::manifest::SkillManifest;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,9 +22,15 @@ impl SkillDetector {
                 continue;
             }
 
+            // Marketplace repositories (for example Lex-Machina) commonly
+            // keep their installable skills below `<repo>/.claude/skills`.
+            // The old depth of three stopped at the collection directory and
+            // silently hid every real SKILL.md one level below it. Keep the
+            // traversal bounded, but allow the supported agent layouts and
+            // still prune each manifest subtree as soon as it is found.
             let mut entries = WalkDir::new(base_path)
                 .follow_links(true)
-                .max_depth(3)
+                .max_depth(8)
                 .into_iter();
             while let Some(entry) = entries.next() {
                 let Ok(entry) = entry else {
@@ -38,7 +45,12 @@ impl SkillDetector {
                 let p = entry.path();
                 if entry.file_type().is_dir() {
                     if let Some(candidate) = Self::inspect_candidate_directory(p, base_path) {
-                        let key = candidate.id.clone();
+                        // A matching display name does not prove two installs
+                        // are the same product: e.g. `seo-audit` from
+                        // marketingskills and from claude-seo have unrelated
+                        // release lines. Merge locations only when their
+                        // upstream identity also matches.
+                        let key = Self::discovery_key(&candidate);
 
                         if let Some(existing) = skills_map.get_mut(&key) {
                             if !existing.installed_locations.contains(&p.to_path_buf()) {
@@ -72,8 +84,77 @@ impl SkillDetector {
         }
 
         let mut skills: Vec<SkillMetadata> = skills_map.into_values().collect();
+        Self::disambiguate_duplicate_ids(&mut skills);
         skills.sort_by_key(|skill| skill.name.to_lowercase());
         skills
+    }
+
+    fn discovery_key(skill: &SkillMetadata) -> String {
+        let source = skill
+            .remote_url
+            .as_deref()
+            .map(|remote| {
+                GitHubService::normalize_github_repository_url(remote)
+                    .unwrap_or_else(|| remote.trim().trim_end_matches(".git").to_string())
+                    .to_lowercase()
+            })
+            .unwrap_or_else(|| "local".to_string());
+        format!("{}|{}", skill.id, source)
+    }
+
+    /// Preserve legacy IDs while a name has one upstream. If same-named
+    /// skills come from different repositories, use a stable repository slug
+    /// for the additional IDs so branch/repository overrides and updates can
+    /// never cross between unrelated packages.
+    fn disambiguate_duplicate_ids(skills: &mut [SkillMetadata]) {
+        let mut groups = std::collections::HashMap::<String, Vec<usize>>::new();
+        for (index, skill) in skills.iter().enumerate() {
+            groups.entry(skill.id.clone()).or_default().push(index);
+        }
+        for indexes in groups.values_mut().filter(|indexes| indexes.len() > 1) {
+            indexes.sort_by_key(|index| {
+                skills[*index]
+                    .remote_url
+                    .as_deref()
+                    .map(|url| {
+                        GitHubService::normalize_github_repository_url(url)
+                            .unwrap_or_else(|| url.trim().trim_end_matches(".git").to_string())
+                            .to_lowercase()
+                    })
+                    .unwrap_or_default()
+            });
+            let base_id = skills[indexes[0]].id.clone();
+            let mut used = std::collections::HashSet::from([base_id.clone()]);
+            for index in indexes.iter().skip(1) {
+                let source = skills[*index]
+                    .remote_url
+                    .as_deref()
+                    .and_then(GitHubService::parse_github_owner_repo)
+                    .map(|(owner, repo)| format!("{owner}-{repo}"))
+                    .unwrap_or_else(|| format!("local-{}", index));
+                let slug = source
+                    .chars()
+                    .map(|character| {
+                        if character.is_ascii_alphanumeric() {
+                            character.to_ascii_lowercase()
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect::<String>()
+                    .split('-')
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("-");
+                let mut candidate = format!("{base_id}-{slug}");
+                let mut suffix = 2;
+                while !used.insert(candidate.clone()) {
+                    candidate = format!("{base_id}-{slug}-{suffix}");
+                    suffix += 1;
+                }
+                skills[*index].id = candidate;
+            }
+        }
     }
 
     fn is_ignored_directory(name: &std::ffi::OsStr) -> bool {
@@ -703,6 +784,61 @@ metadata:
             GitService::repository_root(&skill_dir),
             Some(fs::canonicalize(&root).unwrap())
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discovers_skills_nested_in_a_claude_marketplace_repository() {
+        let root = fixture_root("claude-marketplace");
+        let marketplace = root.join("Lex-Machina/.claude/skills/prawny-router-v3");
+        write_file(
+            &marketplace.join("SKILL.md"),
+            "---\nname: prawny-router-v3\ndescription: Legal router\n---\n# Router\n",
+        );
+        let repo = git2::Repository::init(root.join("Lex-Machina")).unwrap();
+        repo.remote(
+            "origin",
+            "https://github.com/michaleiatrak-star/Lex-Machina",
+        )
+        .unwrap();
+
+        let skills = SkillDetector::scan_directories(std::slice::from_ref(&root));
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "prawny-router-v3");
+        assert_eq!(
+            skills[0].remote_url.as_deref(),
+            Some("https://github.com/michaleiatrak-star/Lex-Machina")
+        );
+        assert_eq!(
+            fs::canonicalize(&skills[0].path).unwrap(),
+            fs::canonicalize(marketplace).unwrap()
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn keeps_same_named_skills_from_different_repositories_independent() {
+        let root = fixture_root("same-name-different-sources");
+        let first = root.join("first/seo-audit");
+        let second = root.join("second/seo-audit");
+        for (path, remote) in [
+            (&first, "https://github.com/coreyhaines31/marketingskills"),
+            (&second, "https://github.com/AgriciDaniel/claude-seo"),
+        ] {
+            write_file(
+                &path.join("SKILL.md"),
+                "---\nname: seo-audit\nversion: 1.0.0\n---\n# SEO\n",
+            );
+            let repo = git2::Repository::init(path).unwrap();
+            repo.remote("origin", remote).unwrap();
+        }
+
+        let skills = SkillDetector::scan_directories(std::slice::from_ref(&root));
+        assert_eq!(skills.len(), 2);
+        assert_ne!(skills[0].id, skills[1].id);
+        assert!(skills.iter().all(|skill| skill.name == "seo-audit"));
 
         let _ = fs::remove_dir_all(root);
     }

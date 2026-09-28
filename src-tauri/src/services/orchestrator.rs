@@ -9,6 +9,7 @@ use crate::services::github::GitHubService;
 use crate::services::managed_manifest::{ManagedManifest, ManagedManifestKind};
 use crate::services::manifest::SkillManifest;
 use crate::services::mcp::McpService;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -67,6 +68,52 @@ impl UpdateOrchestrator {
         let canonical_targets = Self::resolve_locations(&locations)?;
         let operations = Self::plan_operations(&canonical_targets);
 
+        // Resolve each remote's release once before touching any location.
+        // Previously every operation called `ls-remote` independently and a
+        // multi-location update could select different tags during a moving
+        // upstream release. A shared plan makes the transaction deterministic
+        // and lets non-Git mirrors use the same release as their Git source.
+        let mut planned_tags = HashMap::<String, String>::new();
+        let mut planned_default_tag = None;
+        if explicit_branch.is_none() && target_version.is_none() {
+            for operation in operations.iter().filter(|operation| operation.is_git) {
+                let Some(remote) = GitService::get_remote_url(&operation.target) else {
+                    continue;
+                };
+                let remote_key = Self::remote_key(&remote);
+                if planned_tags.contains_key(&remote_key) {
+                    continue;
+                }
+                if let Some(tag) = GitService::get_latest_remote_tag(&operation.target)? {
+                    if planned_default_tag.is_none() {
+                        planned_default_tag = Some(tag.clone());
+                    }
+                    planned_tags.insert(remote_key, tag);
+                }
+            }
+        }
+        let target_tag = planned_default_tag
+            .as_deref()
+            .map(|tag| tag.trim_start_matches(['v', 'V']).to_string())
+            .unwrap_or(target_tag);
+
+        let mut planned_branch_commits = HashMap::<String, String>::new();
+        if let Some(branch) = explicit_branch.as_deref() {
+            for operation in operations.iter().filter(|operation| operation.is_git) {
+                let Some(remote) = GitService::get_remote_url(&operation.target) else {
+                    continue;
+                };
+                let remote_key = Self::remote_key(&remote);
+                if planned_branch_commits.contains_key(&remote_key) {
+                    continue;
+                }
+                planned_branch_commits.insert(
+                    remote_key,
+                    GitService::get_remote_branch_commit(&operation.target, branch)?,
+                );
+            }
+        }
+
         // Never snapshot, check out, or rewrite an arbitrary directory. The
         // detector should make this guard unreachable in normal use, but it is
         // the transaction-level safety net for stale UI state and custom IPC.
@@ -80,7 +127,8 @@ impl UpdateOrchestrator {
                 && McpService::is_laravel_boost_project(target))
                 || (skill.item_type == ManagedItemType::Plugin
                     && manifest == ManagedManifestKind::Plugin
-                    && ClaudePluginService::installation_for_path(target).is_some());
+                    && (ClaudePluginService::installation_for_path(target).is_some()
+                        || ClaudePluginService::marketplace_for_path(target).is_some()));
             if !GitService::is_git_repository(target)
                 && skill.item_type != ManagedItemType::Skill
                 && !safe_adapter
@@ -127,6 +175,7 @@ impl UpdateOrchestrator {
 
         // 2. Stage: Perform updates across all locations
         let mut resolved_version: Option<String> = None;
+        let mut resolved_tag: Option<String> = None;
         let mut resolved_locations: Option<Vec<PathBuf>> = None;
         for operation in &operations {
             let target = &operation.target;
@@ -198,6 +247,33 @@ impl UpdateOrchestrator {
                 verification_targets = locations.clone();
                 resolved_locations = Some(locations);
                 resolved_version = Some(version);
+            // Claude marketplace checkouts are registry-owned sources. The
+            // marketplace command updates the catalog and its plugin manifests
+            // together; treating the directory as a generic Git repository
+            // would fail for legitimate installations without a local .git.
+            } else if skill.item_type == ManagedItemType::Plugin
+                && manifest == ManagedManifestKind::Plugin
+                && ClaudePluginService::marketplace_for_path(logical_target).is_some()
+            {
+                let locations = match ClaudePluginService::update_marketplace(logical_target) {
+                    Ok(locations) => locations,
+                    Err(error) => {
+                        for (t, snap) in &snapshots {
+                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                        }
+                        return Err(error);
+                    }
+                };
+                let version =
+                    ClaudePluginService::plugin_version(&locations[0]).ok_or_else(|| {
+                        SkillSyncError::IntegrityCheckFailed(format!(
+                            "Claude Code nie podał wersji marketplace po aktualizacji w {}",
+                            locations[0].display()
+                        ))
+                    })?;
+                verification_targets = locations.clone();
+                resolved_locations = Some(locations);
+                resolved_version = Some(version);
             // A. If Git repo, perform fetch and checkout
             } else if operation.is_git {
                 // A portable package can need a tiny local SKILL.md adapter
@@ -224,7 +300,31 @@ impl UpdateOrchestrator {
                 let checkout_result = if let Some(branch) = &explicit_branch {
                     tracked_branch = Some(branch.clone());
                     resolved_latest_version = Some(branch.clone());
-                    GitService::fetch_and_checkout_branch(target, branch, allow_git_checkout)
+                    let result =
+                        GitService::fetch_and_checkout_branch(target, branch, allow_git_checkout);
+                    if result.is_ok() {
+                        if let Some(remote) = GitService::get_remote_url(target) {
+                            if let Some(expected) =
+                                planned_branch_commits.get(&Self::remote_key(&remote))
+                            {
+                                if GitService::get_head_commit(target).as_deref()
+                                    != Some(expected.as_str())
+                                {
+                                    for (t, snap) in &snapshots {
+                                        let _ = BackupService::restore_snapshot(
+                                            t,
+                                            &snap.backup_file_path,
+                                        );
+                                    }
+                                    return Err(SkillSyncError::IntegrityCheckFailed(
+                                        "gałąź upstream zmieniła się w trakcie aktualizacji; ponów próbę"
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    result
                 } else if let Some(requested_tag) = target_version.as_deref() {
                     tracked_branch = None;
                     let version = requested_tag.trim_start_matches(['v', 'V']).to_string();
@@ -232,10 +332,31 @@ impl UpdateOrchestrator {
                     resolved_version = Some(version);
                     GitService::fetch_and_checkout_tag(target, requested_tag, allow_git_checkout)
                 } else {
-                    match GitService::get_latest_remote_tag(target) {
-                        Ok(Some(remote_tag)) => {
+                    let planned_tag = GitService::get_remote_url(target)
+                        .and_then(|remote| planned_tags.get(&Self::remote_key(&remote)).cloned());
+                    let remote_tag = match planned_tag {
+                        Some(tag) => Some(tag),
+                        None => GitService::get_latest_remote_tag(target)?,
+                    };
+                    match remote_tag {
+                        Some(remote_tag) => {
                             tracked_branch = None;
                             let version = remote_tag.trim_start_matches(['v', 'V']).to_string();
+                            if let Some(previous) = &resolved_tag {
+                                if previous.trim_start_matches(['v', 'V']) != version.as_str() {
+                                    for (t, snap) in &snapshots {
+                                        let _ = BackupService::restore_snapshot(
+                                            t,
+                                            &snap.backup_file_path,
+                                        );
+                                    }
+                                    return Err(SkillSyncError::IntegrityCheckFailed(
+                                        "lokalizacje wskazują różne wydania upstream; aktualizacja została wycofana"
+                                            .to_string(),
+                                    ));
+                                }
+                            }
+                            resolved_tag = Some(remote_tag.clone());
                             resolved_latest_version = Some(version.clone());
                             resolved_version = Some(version);
                             GitService::fetch_and_checkout_tag(
@@ -244,7 +365,7 @@ impl UpdateOrchestrator {
                                 allow_git_checkout,
                             )
                         }
-                        Ok(None) => {
+                        None => {
                             let branch = GitService::resolve_fallback_branch(
                                 target,
                                 skill.detected_branch.as_deref(),
@@ -257,7 +378,6 @@ impl UpdateOrchestrator {
                                 allow_git_checkout,
                             )
                         }
-                        Err(error) => Err(error),
                     }
                 };
                 if let Err(e) = checkout_result {
@@ -269,12 +389,27 @@ impl UpdateOrchestrator {
             } else if skill.item_type == ManagedItemType::Skill {
                 if let Some(ref remote_url) = skill.remote_url {
                     // If not git repo, fetch latest upstream SKILL.md if available
-                    if let Some(upstream_content) =
+                    let Some(upstream_content) =
                         GitHubService::fetch_raw_skill_md(remote_url, &target_tag, &skill.name)
                             .await
-                    {
-                        let skill_md_path = logical_target.join("SKILL.md");
-                        let _ = fs::write(&skill_md_path, upstream_content);
+                    else {
+                        for (t, snap) in &snapshots {
+                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                        }
+                        return Err(SkillSyncError::IntegrityCheckFailed(format!(
+                            "Nie można pobrać manifestu skilla {} z {} dla wersji {}",
+                            skill.name, remote_url, target_tag
+                        )));
+                    };
+                    let skill_md_path = logical_target.join("SKILL.md");
+                    if let Err(error) = fs::write(&skill_md_path, upstream_content) {
+                        for (t, snap) in &snapshots {
+                            let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                        }
+                        return Err(SkillSyncError::FileSystem(format!(
+                            "Nie można zapisać manifestu skilla po aktualizacji w {}: {error}",
+                            skill_md_path.display()
+                        )));
                     }
                 }
             } else {
@@ -482,12 +617,23 @@ impl UpdateOrchestrator {
         operations
     }
 
+    fn remote_key(remote: &str) -> String {
+        GitHubService::normalize_github_repository_url(remote)
+            .unwrap_or_else(|| remote.trim().trim_end_matches(".git").to_string())
+            .to_lowercase()
+    }
+
     fn version_from_manifest(item_type: &ManagedItemType, path: &Path) -> Option<String> {
         match item_type {
             ManagedItemType::Skill => SkillDetector::scan_directories(&[path.to_path_buf()])
                 .into_iter()
                 .find(|skill| skill.path == path)
-                .map(|skill| skill.current_version)
+                .map(|skill| {
+                    skill
+                        .current_version
+                        .trim_start_matches(['v', 'V'])
+                        .to_string()
+                })
                 .filter(|version| version != crate::services::detector::UNKNOWN_SKILL_VERSION),
             ManagedItemType::Plugin => {
                 for relative in [
@@ -817,6 +963,28 @@ mod tests {
             r#"{"name":"documentation"}"#
         );
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn refuses_to_bump_a_non_git_skill_when_upstream_manifest_is_unavailable() {
+        let dir = fixture_dir("missing-upstream-manifest");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: fixture\nversion: \"1.0.0\"\n---\n# Fixture\n",
+        )
+        .unwrap();
+        let mut metadata = metadata_for(dir.clone());
+        metadata.remote_url = Some("https://example.invalid/missing-skill".to_string());
+
+        let error = UpdateOrchestrator::update_skill_atomic(&metadata, Some("2.0.0".into()), false)
+            .await
+            .expect_err("a failed upstream fetch must not become a local version bump");
+        assert!(error.to_string().contains("Nie można pobrać manifestu"));
+        assert!(fs::read_to_string(dir.join("SKILL.md"))
+            .unwrap()
+            .contains("version: \"1.0.0\""));
         let _ = fs::remove_dir_all(dir);
     }
 

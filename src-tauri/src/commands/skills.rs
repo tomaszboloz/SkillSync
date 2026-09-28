@@ -561,26 +561,59 @@ pub async fn open_in_editor(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn open_url(url: String) -> Result<(), String> {
+    let url = url.trim().to_string();
+    if !is_safe_external_url(&url) {
+        return Err(
+            "Dozwolone są wyłącznie adresy http:// lub https:// bez znaków sterujących."
+                .to_string(),
+        );
+    }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open").arg(&url).spawn();
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|error| error.to_string())?;
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", &url])
-            .spawn();
+        // Calling `cmd /C start` lets URL text become shell syntax. Explorer
+        // receives the argument directly and avoids command injection.
+        std::process::Command::new("explorer.exe")
+            .arg(&url)
+            .spawn()
+            .map_err(|error| error.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn is_safe_external_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    !trimmed.is_empty()
+        && !trimmed.chars().any(|character| character.is_control())
+        && (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_url_validation_rejects_shell_and_non_web_targets() {
+        assert!(is_safe_external_url(
+            "https://github.com/tomaszboloz/SkillSync"
+        ));
+        assert!(!is_safe_external_url("file:///etc/passwd"));
+        assert!(!is_safe_external_url("https://example.test/\nopen"));
+        assert!(is_safe_external_url("https://example.test/?q=a&next=b"));
+    }
 
     fn deletion_fixture(path: PathBuf, id: &str) -> SkillMetadata {
         SkillMetadata {

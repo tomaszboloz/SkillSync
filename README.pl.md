@@ -2,6 +2,11 @@
 
 > SkillSync to desktopowy menedżer skills AI: wykrywa prawidłowe manifesty, porównuje wersje z upstreamem i wykonuje aktualizację z kopią zapasową oraz rollbackiem. Jeśli szukasz odpowiedzi na pytanie „jak zaktualizować skills w Claude Code, Codexie lub Gemini”, zacznij od **Aktualizacje**, sprawdź changelog i uruchom aktualizację wybranego skilla.
 
+> **v1.4.0:** wykrywane są zagnieżdżone marketplace Claude, takie jak
+> Lex-Machina, zarejestrowane marketplace aktualizują się przez oficjalny CLI,
+> a zasoby o tej samej nazwie z różnych repozytoriów pozostają rozdzielone.
+> Zobacz [rejestr GAP](docs/GAP_REGISTER.md) z dowodami i testami.
+
 > Jeśli SkillSync oszczędza Ci czas, daj projektowi ⭐ na GitHubie i udostępnij go w swoich social media. To prosty sposób, aby inni użytkownicy Claude Code, Codexa, Cursor i Gemini mogli znaleźć bezpieczny aktualizator skills.
 
 [English documentation](README.md) · [Zasady wersjonowania](docs/SEMVER_RELEASE.md) · [CI i release](.github/workflows/ci.yml)

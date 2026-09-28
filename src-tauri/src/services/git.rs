@@ -11,8 +11,13 @@ impl GitService {
         !branch.is_empty()
             && !branch.starts_with('-')
             && !branch.ends_with('.')
-            && !branch.contains("..")
+            && branch != "."
+            && branch != ".."
+            && !branch.starts_with('/')
+            && !branch.ends_with('/')
+            && !branch.contains("//")
             && !branch.contains("@{")
+            && !branch.contains("..")
             && !branch.chars().any(|character| {
                 character.is_whitespace()
                     || character.is_control()
@@ -735,6 +740,9 @@ mod tests {
         assert!(!GitService::is_valid_branch_name(
             "https://github.com/ayghri/i-have-adhd"
         ));
+        assert!(!GitService::is_valid_branch_name("feature//branch"));
+        assert!(!GitService::is_valid_branch_name("/feature"));
+        assert!(!GitService::is_valid_branch_name("feature/"));
         assert!(GitService::is_valid_branch_name("main"));
         assert!(GitService::is_valid_branch_name("feature/branch"));
     }

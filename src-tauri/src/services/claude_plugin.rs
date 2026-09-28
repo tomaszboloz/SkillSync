@@ -17,6 +17,13 @@ pub struct ClaudePluginInstallation {
     pub plugins_root: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct ClaudeMarketplaceInstallation {
+    pub name: String,
+    pub install_path: PathBuf,
+    pub plugins_root: PathBuf,
+}
+
 pub struct ClaudePluginService;
 
 impl ClaudePluginService {
@@ -57,6 +64,93 @@ impl ClaudePluginService {
             }
         }
         None
+    }
+
+    /// Resolve a marketplace checkout through Claude Code's own registry.
+    /// Marketplace directories are not plugin cache repositories and must not
+    /// be updated with Git operations or arbitrary package scripts.
+    pub fn marketplace_for_path(path: &Path) -> Option<ClaudeMarketplaceInstallation> {
+        let install_path = fs::canonicalize(path).ok()?;
+        let marketplaces = install_path.ancestors().find(|ancestor| {
+            ancestor
+                .file_name()
+                .is_some_and(|name| name == "marketplaces")
+                && ancestor
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == ".claude")
+        })?;
+        let plugins_root = marketplaces.parent()?.to_path_buf();
+        let registry = fs::read_to_string(plugins_root.join("known_marketplaces.json"))
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())?;
+        let entry = registry.as_object()?.iter().find_map(|(name, value)| {
+            let registered = value.get("installLocation")?.as_str()?;
+            let registered = fs::canonicalize(registered).ok()?;
+            (registered == install_path).then(|| ClaudeMarketplaceInstallation {
+                name: name.clone(),
+                install_path: install_path.clone(),
+                plugins_root: plugins_root.clone(),
+            })
+        })?;
+        Some(entry)
+    }
+
+    pub fn update_marketplace(path: &Path) -> Result<Vec<PathBuf>, SkillSyncError> {
+        let marketplace = Self::marketplace_for_path(path).ok_or_else(|| {
+            SkillSyncError::UnsupportedUpdateMethod(format!(
+                "{} nie jest aktywnym marketplace Claude Code z rejestrem known_marketplaces.json",
+                path.display()
+            ))
+        })?;
+        let cli = Self::resolve_cli().ok_or_else(|| {
+            SkillSyncError::UnsupportedUpdateMethod(
+                "Nie znaleziono Claude Code CLI. Ustaw SKILLSYNC_CLAUDE_CLI albo zainstaluj Claude Code i spróbuj ponownie."
+                    .to_string(),
+            )
+        })?;
+        let mut command = Command::new(&cli);
+        if let Some(path) = Self::runtime_path(&cli) {
+            command.env("PATH", path);
+        }
+        let output = command
+            .args(["plugin", "marketplace", "update", &marketplace.name])
+            .output()
+            .map_err(|error| {
+                SkillSyncError::UnsupportedUpdateMethod(format!(
+                    "Nie można uruchomić Claude Code CLI ({}): {error}",
+                    cli.display()
+                ))
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let detail = if stderr.is_empty() {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            } else {
+                stderr
+            };
+            return Err(SkillSyncError::FileSystem(format!(
+                "Claude Code nie zaktualizował marketplace {}: {}",
+                marketplace.name, detail
+            )));
+        }
+
+        let refreshed = Self::marketplace_for_path(&marketplace.install_path).ok_or_else(|| {
+            SkillSyncError::IntegrityCheckFailed(format!(
+                "Claude Code usunął lub przeniósł marketplace {} po aktualizacji",
+                marketplace.name
+            ))
+        })?;
+        if ManagedManifest::validate_plugin(&refreshed.install_path).is_err()
+            && !refreshed.install_path.join("marketplace.json").is_file()
+        {
+            return Err(SkillSyncError::IntegrityCheckFailed(format!(
+                "Marketplace {} nie pozostawił poprawnego manifestu po aktualizacji",
+                marketplace.name
+            )));
+        }
+        Ok(vec![refreshed.install_path])
     }
 
     pub fn is_claude_cache_path(path: &Path) -> bool {
@@ -129,7 +223,7 @@ impl ClaudePluginService {
         Ok(locations)
     }
 
-    fn resolve_cli() -> Option<PathBuf> {
+    pub(crate) fn resolve_cli() -> Option<PathBuf> {
         if let Some(configured) = std::env::var_os("SKILLSYNC_CLAUDE_CLI") {
             let configured = PathBuf::from(configured);
             if configured.is_file() {
@@ -176,7 +270,7 @@ impl ClaudePluginService {
         candidates.into_iter().find(|candidate| candidate.is_file())
     }
 
-    fn runtime_path(cli: &Path) -> Option<OsString> {
+    pub(crate) fn runtime_path(cli: &Path) -> Option<OsString> {
         let mut directories: Vec<PathBuf> =
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
         if let Some(parent) = cli.parent() {
@@ -259,6 +353,43 @@ mod tests {
         assert!(ClaudePluginService::installation_for_path(&active).is_some());
         assert!(ClaudePluginService::installation_for_path(&stale).is_none());
         assert!(ClaudePluginService::is_claude_cache_path(&stale));
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn recognizes_a_registered_marketplace_as_a_distinct_update_source() {
+        let home = std::env::temp_dir().join(format!(
+            "skillsync-claude-marketplace-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let plugins = home.join(".claude/plugins");
+        let marketplace = plugins.join("marketplaces/n8n-mcp-skills");
+        fs::create_dir_all(&marketplace).unwrap();
+        fs::write(
+            marketplace.join("plugin.json"),
+            r#"{"name":"n8n-mcp-skills","version":"1.27.3"}"#,
+        )
+        .unwrap();
+        fs::write(
+            plugins.join("known_marketplaces.json"),
+            serde_json::json!({
+                "n8n-mcp-skills": {
+                    "source": {"source": "github", "repo": "czlonkowski/n8n-skills"},
+                    "installLocation": marketplace,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let installation = ClaudePluginService::marketplace_for_path(&marketplace)
+            .expect("registered marketplace should be updateable");
+        assert_eq!(installation.name, "n8n-mcp-skills");
+        assert_eq!(
+            installation.install_path,
+            fs::canonicalize(marketplace).unwrap()
+        );
+
         let _ = fs::remove_dir_all(home);
     }
 }

@@ -2,6 +2,7 @@ use crate::models::config::{MonitoredPath, MonitoredPathType};
 use crate::models::skill::{AgentScope, ManagedItemType, SkillMetadata, SkillStatus};
 use crate::services::claude_plugin::ClaudePluginService;
 use crate::services::git::GitService;
+use crate::services::github::GitHubService;
 use crate::services::managed_manifest::{ManagedManifest, ManagedManifestKind};
 use crate::services::mcp::McpService;
 use std::collections::HashMap;
@@ -52,7 +53,10 @@ impl ManagedItemDetector {
                     continue;
                 };
                 let candidate = Self::metadata_for(path, monitored, item_type.clone(), manifest);
-                let key = candidate.id.clone();
+                // Two marketplaces may publish an item with the same display
+                // name. Their locations must not be merged into one update
+                // transaction because each registry owns a different source.
+                let key = Self::discovery_key(&candidate);
                 if let Some(existing) = items.get_mut(&key) {
                     Self::add_location(existing, path);
                     if existing.remote_url.is_none() {
@@ -70,8 +74,76 @@ impl ManagedItemDetector {
         }
 
         let mut values: Vec<_> = items.into_values().collect();
+        Self::disambiguate_duplicate_ids(&mut values);
         values.sort_by_key(|item| item.name.to_lowercase());
         values
+    }
+
+    fn discovery_key(item: &SkillMetadata) -> String {
+        let source = item
+            .remote_url
+            .as_deref()
+            .and_then(GitHubService::normalize_github_repository_url)
+            .unwrap_or_else(|| {
+                item.remote_url
+                    .as_deref()
+                    .unwrap_or("local")
+                    .trim()
+                    .trim_end_matches(".git")
+                    .to_lowercase()
+            });
+        format!("{}|{}", item.id, source.to_lowercase())
+    }
+
+    fn disambiguate_duplicate_ids(items: &mut [SkillMetadata]) {
+        let mut groups = HashMap::<String, Vec<usize>>::new();
+        for (index, item) in items.iter().enumerate() {
+            groups.entry(item.id.clone()).or_default().push(index);
+        }
+        for indexes in groups.values_mut().filter(|indexes| indexes.len() > 1) {
+            indexes.sort_by_key(|index| {
+                items[*index]
+                    .remote_url
+                    .as_deref()
+                    .map(|url| {
+                        GitHubService::normalize_github_repository_url(url)
+                            .unwrap_or_else(|| url.trim().trim_end_matches(".git").to_string())
+                            .to_lowercase()
+                    })
+                    .unwrap_or_default()
+            });
+            let base_id = items[indexes[0]].id.clone();
+            let mut used = std::collections::HashSet::from([base_id.clone()]);
+            for index in indexes.iter().skip(1) {
+                let source = items[*index]
+                    .remote_url
+                    .as_deref()
+                    .and_then(GitHubService::parse_github_owner_repo)
+                    .map(|(owner, repo)| format!("{owner}-{repo}"))
+                    .unwrap_or_else(|| format!("local-{}", index));
+                let slug = source
+                    .chars()
+                    .map(|character| {
+                        if character.is_ascii_alphanumeric() {
+                            character.to_ascii_lowercase()
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect::<String>()
+                    .split('-')
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("-");
+                let mut candidate = format!("{base_id}-{slug}");
+                let mut suffix = 2;
+                while !used.insert(candidate.clone()) {
+                    candidate = format!("{base_id}-{slug}-{suffix}");
+                    suffix += 1;
+                }
+                items[*index].id = candidate;
+            }
+        }
     }
 
     fn metadata_for(
@@ -244,16 +316,21 @@ impl ManagedItemDetector {
             path.parent()
                 .and_then(GitService::get_remote_url)
                 .or_else(|| {
-                    for candidate in ["composer.json", "package.json"] {
+                    for candidate in [
+                        "composer.json",
+                        "package.json",
+                        "plugin.json",
+                        "marketplace.json",
+                        ".claude-plugin/plugin.json",
+                        ".codex-plugin/plugin.json",
+                        ".cursor-plugin/plugin.json",
+                    ] {
                         let Some(document) = Self::read_json(path.join(candidate)) else {
                             continue;
                         };
                         for key in ["repository", "homepage"] {
-                            if let Some(url) = document.get(key).and_then(serde_json::Value::as_str)
-                            {
-                                if url.contains("github.com/") {
-                                    return Some(url.to_string());
-                                }
+                            if let Some(url) = Self::github_url_from_value(document.get(key)) {
+                                return Some(url);
                             }
                         }
                         if let Some(url) = document
@@ -261,14 +338,66 @@ impl ManagedItemDetector {
                             .and_then(|support| support.get("source"))
                             .and_then(serde_json::Value::as_str)
                         {
-                            if url.contains("github.com/") {
-                                return Some(url.to_string());
+                            if let Some(url) = GitHubService::normalize_github_repository_url(url) {
+                                return Some(url);
                             }
+                        }
+                    }
+
+                    // Claude Code marketplace checkouts are deliberately not
+                    // Git repositories. Their canonical source is recorded in
+                    // known_marketplaces.json next to the marketplace folder.
+                    let marketplace = path.ancestors().find(|ancestor| {
+                        ancestor
+                            .file_name()
+                            .is_some_and(|name| name == "marketplaces")
+                            && ancestor
+                                .parent()
+                                .and_then(Path::parent)
+                                .and_then(Path::file_name)
+                                .is_some_and(|name| name == ".claude")
+                    });
+                    if let Some(marketplaces) = marketplace {
+                        let registry =
+                            Self::read_json(marketplaces.parent()?.join("known_marketplaces.json"));
+                        if let Some(repository) = registry
+                            .as_ref()
+                            .and_then(serde_json::Value::as_object)
+                            .and_then(|entries| {
+                                entries.values().find_map(|entry| {
+                                    let install = entry
+                                        .get("installLocation")
+                                        .and_then(serde_json::Value::as_str)?;
+                                    let canonical = fs::canonicalize(install).ok()?;
+                                    let current = fs::canonicalize(path).ok()?;
+                                    (canonical == current).then(|| {
+                                        entry.get("source").and_then(|source| source.get("repo"))
+                                    })
+                                })
+                            })
+                            .flatten()
+                            .and_then(|value| Self::github_url_from_value(Some(value)))
+                        {
+                            return Some(repository);
                         }
                     }
                     None
                 })
         })
+    }
+
+    fn github_url_from_value(value: Option<&serde_json::Value>) -> Option<String> {
+        let raw = match value? {
+            serde_json::Value::String(value) => value.clone(),
+            serde_json::Value::Object(object) => object
+                .get("url")
+                .or_else(|| object.get("directory"))
+                .or_else(|| object.get("repo"))
+                .and_then(serde_json::Value::as_str)?
+                .to_string(),
+            _ => return None,
+        };
+        GitHubService::normalize_github_repository_url(&raw)
     }
 
     fn item_type_for(path_type: &MonitoredPathType) -> ManagedItemType {
@@ -417,6 +546,59 @@ mod tests {
             items[0].remote_url.as_deref(),
             Some("https://github.com/laravel/boost")
         );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn resolves_the_github_source_for_a_registered_marketplace_without_git() {
+        let path = root("marketplace-source");
+        let plugins = path.join(".claude/plugins");
+        let marketplace = plugins.join("marketplaces/n8n-mcp-skills");
+        fs::create_dir_all(&marketplace).unwrap();
+        fs::write(
+            marketplace.join("plugin.json"),
+            r#"{"name":"n8n-mcp-skills","version":"1.27.3","repository":"https://github.com/czlonkowski/n8n-skills"}"#,
+        )
+        .unwrap();
+        fs::write(
+            plugins.join("known_marketplaces.json"),
+            serde_json::json!({
+                "n8n-mcp-skills": {
+                    "source": {"source": "github", "repo": "czlonkowski/n8n-skills"},
+                    "installLocation": marketplace,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            ManagedItemDetector::resolve_remote_url(&marketplace).as_deref(),
+            Some("https://github.com/czlonkowski/n8n-skills")
+        );
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn keeps_same_named_plugins_from_different_sources_independent() {
+        let path = root("same-plugin-name");
+        for (folder, remote) in [
+            ("first", "https://github.com/example/first-plugin"),
+            ("second", "https://github.com/example/second-plugin"),
+        ] {
+            let plugin = path.join(folder);
+            fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+            fs::write(
+                plugin.join(".claude-plugin/plugin.json"),
+                format!(r#"{{"name":"shared","version":"1.0.0","repository":"{remote}"}}"#),
+            )
+            .unwrap();
+        }
+
+        let items =
+            ManagedItemDetector::scan_paths(&[monitored(path.clone(), MonitoredPathType::Plugin)]);
+        assert_eq!(items.len(), 2);
+        assert_ne!(items[0].id, items[1].id);
         let _ = fs::remove_dir_all(path);
     }
 }
