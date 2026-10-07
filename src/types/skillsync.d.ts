@@ -23,6 +23,7 @@ export type UpdateStage =
   | "failed";
 
 export interface SkillMetadata {
+  displayName?: string | null;
   id: string;
   itemType?: ManagedItemType;
   name: string;

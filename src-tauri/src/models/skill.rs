@@ -45,6 +45,9 @@ pub struct SkillMetadata {
     pub item_type: ManagedItemType,
     pub id: String,
     pub name: String,
+    /// Presentation only; never use this label to resolve upstream files.
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub description: String,
     pub current_version: String,
     pub latest_version: Option<String>,

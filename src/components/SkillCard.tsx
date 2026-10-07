@@ -143,7 +143,7 @@ export const SkillCard: React.FC<SkillCardProps> = ({ skill }) => {
         {/* Title */}
         <h3 className="text-base font-semibold text-foreground tracking-tight group-hover:text-primary transition-colors flex items-center gap-1.5">
           <FileCode className="w-4 h-4 text-primary/70" />
-          {skill.name}
+          {skill.displayName ?? skill.name}
         </h3>
 
         {/* Description */}

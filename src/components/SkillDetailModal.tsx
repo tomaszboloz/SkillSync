@@ -212,7 +212,7 @@ export const SkillDetailModal: React.FC = () => {
                     )}
                 </div>
                 <h2 className="text-xl font-bold text-foreground tracking-tight">
-                  {selectedSkill.name}
+                  {selectedSkill.displayName ?? selectedSkill.name}
                 </h2>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   Author:{" "}

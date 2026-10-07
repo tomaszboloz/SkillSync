@@ -9,6 +9,8 @@ pub mod github;
 pub mod managed_detector;
 pub mod managed_manifest;
 pub mod manifest;
+mod manifest_provenance;
 pub mod mcp;
 pub mod orchestrator;
 pub mod scan_queue;
+mod upstream_manifest;

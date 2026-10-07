@@ -281,6 +281,7 @@ mod tests {
             item_type: ManagedItemType::Skill,
             id: id.to_string(),
             name: name.to_string(),
+            display_name: None,
             description: format!("{name} description"),
             current_version: "1.0.0".to_string(),
             latest_version: None,

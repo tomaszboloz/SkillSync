@@ -2,6 +2,42 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [1.4.5] - 2026-10-07
+
+### Security
+
+- Updated source-map-js to 1.2.2 to address GHSA-68fv-2mgg-jv7q
+  (event-loop denial of service in indexed source maps).
+
+### Fixed
+
+- Separate canonical skill names from source-qualified display labels. Updating
+  `seo-audit (claude-seo)` now requests `skills/seo-audit/SKILL.md` instead of a
+  nonexistent decorated directory. Package adapters also retain canonical names.
+- Resolve tagged manifests only from the requested version (with or without
+  the `v` prefix); never silently replace a tagged release with `main` or `master`.
+- Reject unrelated root manifests, incomplete downloads and oversized responses.
+  Manifest downloads have a 25-second total deadline.
+- Reuse one verified upstream manifest across the locations in one transaction.
+- Preserve the explicitly selected GitHub source in `skillsync-source` metadata
+  so a subsequent scan does not lose or infer a different repository.
+
+### Tests
+
+- Regression coverage for display-name isolation, idempotent labels, source
+  preservation, exact refs and wrong-manifest rejection.
+- Explicit network tests for claude-seo v2.4.2, a two-location update followed
+  by rescan, and rejecting FastMCP package releases without a matching skill.
+
+### Known limitations
+
+- A Python package release is not an update to a separately authored skill.
+  The configured PrefectHQ/fastmcp v4.0.11 does not contain a `fastmcp` skill
+  manifest; no version number is fabricated to imply an installation.
+- Figma's `v2.2.124-figquery.1` tag declares plugin version `2.2.124`.
+  Owner-managed Claude plugins are still updated by their official adapter;
+  this patch does not promise that the marketplace distributes that Git tag.
+
 ## [1.4.4] - 2026-09-28
 
 ### Fixed

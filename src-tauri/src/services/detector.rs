@@ -104,6 +104,9 @@ impl SkillDetector {
     /// must not be merged; a short repository suffix makes that distinction
     /// explicit without changing stable IDs or update logic.
     pub fn disambiguate_source_names(skills: &mut [SkillMetadata]) {
+        for skill in skills.iter_mut() {
+            skill.display_name = None;
+        }
         let mut names = std::collections::HashMap::<String, Vec<usize>>::new();
         for (index, skill) in skills.iter().enumerate() {
             if skill.remote_url.is_some() {
@@ -122,7 +125,7 @@ impl SkillDetector {
                     .and_then(GitHubService::parse_github_owner_repo)
                     .map(|(_, repository)| repository)
                     .unwrap_or_else(|| "source".to_string());
-                skills[*index].name = format!("{} ({suffix})", skills[*index].name);
+                skills[*index].display_name = Some(format!("{} ({suffix})", skills[*index].name));
             }
         }
     }
@@ -492,6 +495,7 @@ impl SkillDetector {
             item_type: crate::models::skill::ManagedItemType::Skill,
             id: format!("skill-{}", name.replace(' ', "-").to_lowercase()),
             name,
+            display_name: None,
             description,
             current_version,
             latest_version: None,
@@ -574,6 +578,13 @@ impl SkillDetector {
         // `i-have-adhd/skills/i-have-adhd/SKILL.md`.
         if let Some(url) = GitService::get_remote_url(dir) {
             return Some(url);
+        }
+        if let Some(source) = fm
+            .skillsync_source
+            .as_deref()
+            .and_then(GitHubService::normalize_github_repository_url)
+        {
+            return Some(source);
         }
 
         // 3. Frontmatter explicit repository
@@ -722,6 +733,7 @@ impl SkillDetector {
                             "description" => meta.description = Some(val),
                             "author" => meta.author = Some(val),
                             "scope" => meta.scope = Some(val),
+                            "skillsync-source" => meta.skillsync_source = Some(val),
                             "repository" | "repo" | "url" | "homepage" | "github" | "source" => {
                                 meta.repository = Some(val)
                             }
@@ -756,6 +768,7 @@ struct FrontmatterMeta {
     author: Option<String>,
     scope: Option<String>,
     repository: Option<String>,
+    skillsync_source: Option<String>,
     compatibility: Option<String>,
 }
 
@@ -981,8 +994,13 @@ metadata:
         other.remote_url = Some("https://github.com/example/other-suite".to_string());
         duplicates.push(other);
         SkillDetector::disambiguate_source_names(&mut duplicates);
-        assert_ne!(duplicates[0].name, duplicates[1].name);
-        assert!(duplicates[0].name.contains("(suite)"));
+        assert_ne!(duplicates[0].display_name, duplicates[1].display_name);
+        assert!(duplicates[0]
+            .display_name
+            .as_deref()
+            .unwrap()
+            .contains("(suite)"));
+        assert_eq!(duplicates[0].name, duplicates[1].name);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -1098,6 +1116,7 @@ metadata:
             item_type: crate::models::skill::ManagedItemType::Skill,
             id: "skill-seo-audit".to_string(),
             name: "seo-audit".to_string(),
+            display_name: None,
             description: String::new(),
             current_version: "1.0.0".to_string(),
             latest_version: None,
@@ -1128,8 +1147,31 @@ metadata:
         SkillDetector::disambiguate_source_names(&mut resources);
 
         assert_eq!(resources.len(), 2);
-        assert_ne!(resources[0].name, resources[1].name);
-        assert!(resources.iter().all(|resource| resource.name.contains('(')));
+        assert_ne!(resources[0].display_name, resources[1].display_name);
+        let urls = crate::services::upstream_manifest::candidates(
+            resources[1].remote_url.as_deref().unwrap(),
+            "2.4.2",
+            &resources[1].name,
+        )
+        .unwrap();
+        assert!(urls
+            .iter()
+            .any(|url| url.ends_with("/v2.4.2/skills/seo-audit/SKILL.md")));
+        assert!(resources
+            .iter()
+            .all(|resource| resource.name == "seo-audit"));
+        let labels: Vec<_> = resources
+            .iter()
+            .map(|resource| resource.display_name.clone())
+            .collect();
+        SkillDetector::disambiguate_source_names(&mut resources);
+        assert_eq!(
+            labels,
+            resources
+                .iter()
+                .map(|resource| resource.display_name.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

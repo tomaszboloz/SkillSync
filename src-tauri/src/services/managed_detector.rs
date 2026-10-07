@@ -201,6 +201,7 @@ impl ManagedItemDetector {
             ),
             item_type,
             name,
+            display_name: None,
             description,
             current_version: version.trim_start_matches(['v', 'V']).to_string(),
             latest_version: None,

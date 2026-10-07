@@ -114,3 +114,12 @@ upstreamu ani nie zastępuje testów środowiskowych na macOS i Windows.
 | GAP-083 | Canonicalizacja symlinków ukrywała aliasy ścieżek Claude/Codex w szczegółach zasobu | RESOLVED | lokalizacje zachowują odrębne aliasy, a checkout nadal deduplikuje fizyczny target, test symlinków |
 | GAP-084 | Dwa nie-Gitowe manifesty GitHub o tej samej nazwie nadal wyglądały jak duplikaty i mogły zmieniać kolejność między skanami | RESOLVED | `disambiguate_source_names`, sortowanie wyniku collapse oraz regresja raw-manifest sources |
 | GAP-085 | Limit rozmiaru funkcji był deklaracją bez automatycznej bramki regresji | RESOLVED | `scripts/check-rust-function-loc.mjs`, `npm run check:loc` oraz wymagany krok CI (maks. 150 linii funkcji) |
+| GAP-086 | Dopisek repozytorium w nazwie karty stawał się ścieżką upstream i nazwą adaptera | RESOLVED | oddzielne `display_name`, niezmienne `name`, test disambiguation → URL |
+| GAP-087 | Pobieranie tagu mogło po cichu przejść na main/master | RESOLVED | kandydaci obejmują tylko wybrany ref i wariant prefiksu v, testy resolvera |
+| GAP-088 | Dowolny dokument główny repozytorium mógł zastąpić innego skilla | RESOLVED | kontrola nazwy w zamkniętym frontmatter, testy HTML, routera i niepełnego nagłówka |
+| GAP-089 | Każda lokalizacja pobierała manifest niezależnie | RESOLVED | jeden manifest na transakcję, test aktualizacji dwóch lokalizacji i rescan |
+| GAP-090 | Nie było limitu łącznego czasu i rozmiaru manifestu | RESOLVED | deadline 25 s, limit 2 MiB, odrzucanie błędów pobierania |
+| GAP-091 | Nowy manifest mógł usunąć informację o wybranym źródle | RESOLVED | `skillsync-source`, test idempotencji i źródła po rescan |
+| GAP-092 | Przypisany upstream FastMCP jest biblioteką Python, nie źródłem lokalnego skilla fastmcp | OPEN | live tree v4.0.11 nie zawiera pasującego manifestu; test chroni przed fałszywą instalacją, potrzebne właściwe źródło skilla |
+| GAP-093 | Git tag figma figquery nie odpowiada wersji manifestu ani gwarantowanej wersji marketplace | OPEN | tag v2.2.124-figquery.1 deklaruje 2.2.124; potrzebne rozdzielenie kanału właściciela od tagów Git |
+| GAP-094 | source-map-js 1.2.1 zawiera podatność DoS GHSA-68fv-2mgg-jv7q | RESOLVED | lockfile 1.2.2, npm audit 0 podatności |

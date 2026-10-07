@@ -18,6 +18,10 @@ use tokio::sync::Semaphore;
 
 pub struct UpdateOrchestrator;
 
+#[cfg(test)]
+#[path = "orchestrator_manifest_tests.rs"]
+mod manifest_tests;
+
 // Discovery can expose multiple resources from one Git worktree. Serialising
 // update transactions keeps a batch update from checking out the same
 // repository while another resource is creating its safety snapshot.
@@ -44,6 +48,7 @@ struct UpdatePlan {
 }
 
 struct OperationResult {
+    upstream_content: Option<String>,
     tracked_branch: Option<String>,
     resolved_latest_version: Option<String>,
     resolved_version: Option<String>,
@@ -101,6 +106,7 @@ impl UpdateOrchestrator {
             resolved_version,
             resolved_tag: _resolved_tag,
             resolved_locations,
+            ..
         } = Self::execute_operations(&context, operations)
             .await
             .inspect_err(|_| Self::restore_snapshots(&snapshots))?;
@@ -268,6 +274,7 @@ impl UpdateOrchestrator {
         operations: &[UpdateOperation],
     ) -> Result<OperationResult, SkillSyncError> {
         let mut state = OperationResult {
+            upstream_content: None,
             tracked_branch: context.explicit_branch.clone(),
             resolved_latest_version: context.skill.latest_version.clone(),
             resolved_version: None,
@@ -418,18 +425,23 @@ impl UpdateOrchestrator {
         } else if skill.item_type == ManagedItemType::Skill {
             if let Some(ref remote_url) = skill.remote_url {
                 // If not git repo, fetch latest upstream SKILL.md if available
-                let Some(upstream_content) =
-                    GitHubService::fetch_raw_skill_md(remote_url, target_tag, &skill.name).await
-                else {
-                    for (t, snap) in snapshots {
-                        let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
+                if state.upstream_content.is_none() {
+                    state.upstream_content =
+                        GitHubService::fetch_raw_skill_md(remote_url, target_tag, &skill.name)
+                            .await;
+                    if state.upstream_content.is_none() {
+                        return Err(SkillSyncError::IntegrityCheckFailed(format!(
+                            "Nie można pobrać manifestu skilla {} z {} dla wersji {}",
+                            skill.name, remote_url, target_tag
+                        )));
                     }
-                    return Err(SkillSyncError::IntegrityCheckFailed(format!(
-                        "Nie można pobrać manifestu skilla {} z {} dla wersji {}",
-                        skill.name, remote_url, target_tag
-                    )));
-                };
+                }
                 let skill_md_path = logical_target.join("SKILL.md");
+                let upstream_content = state.upstream_content.as_deref().ok_or_else(|| {
+                    SkillSyncError::IntegrityCheckFailed(
+                        "Brak zweryfikowanego manifestu upstream".into(),
+                    )
+                })?;
                 if let Err(error) = fs::write(&skill_md_path, upstream_content) {
                     for (t, snap) in snapshots {
                         let _ = BackupService::restore_snapshot(t, &snap.backup_file_path);
@@ -990,6 +1002,7 @@ mod tests {
             item_type: ManagedItemType::Skill,
             id: "skill-fixture".to_string(),
             name: "fixture".to_string(),
+            display_name: None,
             description: "Fixture skill".to_string(),
             current_version: "1.0.0".to_string(),
             latest_version: Some("1.1.0".to_string()),

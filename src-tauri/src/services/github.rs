@@ -309,68 +309,7 @@ impl GitHubService {
         tag_or_ref: &str,
         skill_name: &str,
     ) -> Option<String> {
-        let (owner, repo) = Self::parse_github_owner_repo(remote_url)?;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(8))
-            .build()
-            .ok()?;
-
-        let clean_tag = tag_or_ref.trim();
-        let tag_v = if clean_tag.starts_with('v') || clean_tag.starts_with('V') {
-            clean_tag.to_string()
-        } else {
-            format!("v{}", clean_tag)
-        };
-
-        // Possible candidate URLs to check
-        let refs = vec![clean_tag, &tag_v, "main", "master"];
-        for r in refs {
-            let candidates = vec![
-                format!(
-                    "https://raw.githubusercontent.com/{}/{}/{}/skills/{}/SKILL.md",
-                    owner, repo, r, skill_name
-                ),
-                format!(
-                    "https://raw.githubusercontent.com/{}/{}/{}/{}/SKILL.md",
-                    owner, repo, r, skill_name
-                ),
-                format!(
-                    "https://raw.githubusercontent.com/{}/{}/{}/SKILL.md",
-                    owner, repo, r
-                ),
-                format!(
-                    "https://raw.githubusercontent.com/{}/{}/{}/skills/{}/skill.md",
-                    owner, repo, r, skill_name
-                ),
-                format!(
-                    "https://raw.githubusercontent.com/{}/{}/{}/skill.md",
-                    owner, repo, r
-                ),
-            ];
-
-            for url in candidates {
-                if let Ok(resp) = client
-                    .get(&url)
-                    .header("User-Agent", "SkillSync-Desktop")
-                    .send()
-                    .await
-                {
-                    if resp.status().is_success() {
-                        if let Ok(text) = resp.text().await {
-                            if !text.trim().is_empty()
-                                && (text.contains("name:")
-                                    || text.contains("# ")
-                                    || text.contains("description:"))
-                            {
-                                return Some(text);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        None
+        super::upstream_manifest::fetch(remote_url, tag_or_ref, skill_name).await
     }
 }
 

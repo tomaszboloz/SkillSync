@@ -49,7 +49,9 @@ export const SkillList: React.FC = () => {
       // Search query
       if (searchQuery.trim() !== "") {
         const q = searchQuery.toLowerCase();
-        const matchName = skill.name.toLowerCase().includes(q);
+        const matchName = (skill.displayName ?? skill.name)
+          .toLowerCase()
+          .includes(q);
         const matchDesc = skill.description.toLowerCase().includes(q);
         const matchAuthor = skill.author.toLowerCase().includes(q);
         return matchName || matchDesc || matchAuthor;
