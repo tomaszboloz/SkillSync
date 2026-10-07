@@ -6,6 +6,7 @@ import { useTranslation } from "../i18n";
 import { getScopeBadgeColor } from "../lib/utils";
 import { formatSkillVersion } from "../lib/version-display";
 import { api } from "../lib/ipc";
+import { resourceError } from "../lib/resource-error";
 import {
   ArrowRight,
   GitBranch,
@@ -34,7 +35,8 @@ interface SkillCardProps {
 
 export const SkillCard: React.FC<SkillCardProps> = ({ skill }) => {
   const { t, language } = useTranslation();
-  const { openDetail, updateSkill, checkGitHubUpdate } = useSkillStore();
+  const { openDetail, updateSkill, checkGitHubUpdate, resourceErrors } =
+    useSkillStore();
   const [isCheckingGitHub, setIsCheckingGitHub] = useState(false);
 
   const isUpdating = skill.status === "updating";
@@ -80,7 +82,7 @@ export const SkillCard: React.FC<SkillCardProps> = ({ skill }) => {
         </span>
       );
     }
-    if (skill.status === "error") {
+    if (skill.status === "error" || resourceError(skill, resourceErrors)) {
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-rose-500/15 text-rose-400 border border-rose-500/30">
           <AlertTriangle className="w-3 h-3" />

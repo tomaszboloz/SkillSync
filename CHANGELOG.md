@@ -2,6 +2,30 @@
 
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [1.4.6] - 2026-10-07
+
+### Fixed
+
+- Resource-specific failures no longer appear in unrelated detail modals.
+  Errors survive on their owning resource and clear after successful retries
+  or fresh checks. Rust's structured error status is displayed correctly.
+- Non-Git skills must have a matching manifest at the proposed release before
+  SkillSync offers that release as an installable update. A library release
+  alone cannot qualify as an update to a separately authored skill.
+- Claude plugins with a GitHub URL and pinned SHA in their registered
+  marketplace use that owner-managed source, not unrelated repository tags.
+  A Figma installation matching the marketplace pin is not offered figquery.
+- Cache keys isolate raw manifest identities and plugin installation channels.
+
+### Limitations
+
+- FastMCP's separately authored skill has no matching manifest in the assigned
+  PrefectHQ/fastmcp v4.0.11 source. It is diagnosed, not silently version-bumped
+  or replaced with the Python library or a different skill.
+- Pinned plugin checks use the registered local marketplace catalog. Refresh
+  that catalog with Claude Code's official marketplace command when needed.
+  Unpinned and git-subdirectory plugin sources are not covered by this resolver.
+
 ## [1.4.5] - 2026-10-07
 
 ### Security

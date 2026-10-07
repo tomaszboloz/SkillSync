@@ -8,7 +8,8 @@ export type SkillStatus =
   | "corrupted"
   | "checking"
   | "updating"
-  | "error";
+  | "error"
+  | { error: string };
 
 export type ManagedItemType = "skill" | "mcp" | "plugin";
 

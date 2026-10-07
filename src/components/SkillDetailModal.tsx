@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useSkillStore } from "../store/useSkillStore";
 import { useTranslation } from "../i18n";
 import { api } from "../lib/ipc";
+import { resourceError } from "../lib/resource-error";
 import { formatSkillVersion } from "../lib/version-display";
 import { BackupSnapshot } from "../types/skillsync";
 import {
@@ -48,8 +49,9 @@ export const SkillDetailModal: React.FC = () => {
     setRepositoryOverride,
     removeSkill,
     deletingSkillId,
-    error,
+    resourceErrors,
   } = useSkillStore();
+  const error = resourceError(selectedSkill, resourceErrors);
 
   const [copied, setCopied] = useState(false);
   const [backups, setBackups] = useState<BackupSnapshot[]>([]);

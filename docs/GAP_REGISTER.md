@@ -120,6 +120,9 @@ upstreamu ani nie zastępuje testów środowiskowych na macOS i Windows.
 | GAP-089 | Każda lokalizacja pobierała manifest niezależnie | RESOLVED | jeden manifest na transakcję, test aktualizacji dwóch lokalizacji i rescan |
 | GAP-090 | Nie było limitu łącznego czasu i rozmiaru manifestu | RESOLVED | deadline 25 s, limit 2 MiB, odrzucanie błędów pobierania |
 | GAP-091 | Nowy manifest mógł usunąć informację o wybranym źródle | RESOLVED | `skillsync-source`, test idempotencji i źródła po rescan |
-| GAP-092 | Przypisany upstream FastMCP jest biblioteką Python, nie źródłem lokalnego skilla fastmcp | OPEN | live tree v4.0.11 nie zawiera pasującego manifestu; test chroni przed fałszywą instalacją, potrzebne właściwe źródło skilla |
-| GAP-093 | Git tag figma figquery nie odpowiada wersji manifestu ani gwarantowanej wersji marketplace | OPEN | tag v2.2.124-figquery.1 deklaruje 2.2.124; potrzebne rozdzielenie kanału właściciela od tagów Git |
+| GAP-092 | Przypisany upstream FastMCP jest biblioteką Python, nie źródłem lokalnego skilla fastmcp | MITIGATED | sprawdzanie manifestu przed ofertą aktualizacji; instalacja nadal wymaga właściwego źródła skilla, bez fikcyjnego podbijania wersji |
+| GAP-093 | Git tag figma figquery nie odpowiada kanałowi marketplace | RESOLVED | resolver przypiętego SHA z rejestru marketplace Claude; test parsowania i read-only weryfikacja rzeczywistej instalacji |
 | GAP-094 | source-map-js 1.2.1 zawiera podatność DoS GHSA-68fv-2mgg-jv7q | RESOLVED | lockfile 1.2.2, npm audit 0 podatności |
+| GAP-095 | Globalny błąd FastMCP pojawiał się w modalach innych zasobów | RESOLVED | resourceErrors po ID, testy rozdzielenia modalów i udanej ponownej próby |
+| GAP-096 | Interfejs oczekiwał stringa error, Rust serializował obiekt error | RESOLVED | zgodny typ SkillStatus i helper komunikatu, test rzeczywistego kształtu payloadu |
+| GAP-097 | Cache wyników źródła nie uwzględniał tożsamości surowego manifestu ani kanału pluginu | RESOLVED | klucze name dla nie-Gitowych skills i ścieżka właściciela pluginu, testy Rust |

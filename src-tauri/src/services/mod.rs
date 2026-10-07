@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod claude_plugin;
+mod claude_update_source;
 pub mod codex_plugin;
 pub mod config;
 pub mod detector;
@@ -13,4 +14,5 @@ mod manifest_provenance;
 pub mod mcp;
 pub mod orchestrator;
 pub mod scan_queue;
+mod update_eligibility;
 mod upstream_manifest;

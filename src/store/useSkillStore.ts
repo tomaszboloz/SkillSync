@@ -31,6 +31,7 @@ interface SkillState {
   isLoading: boolean;
   isScanning: boolean;
   error: string | null;
+  resourceErrors: Record<string, string>;
   searchQuery: string;
   selectedScope: string;
   statusFilter: "all" | "updates" | "up_to_date";
@@ -99,6 +100,7 @@ export const useSkillStore = create<SkillState>()(
     isLoading: true,
     isScanning: false,
     error: null,
+    resourceErrors: {},
     searchQuery: "",
     selectedScope: "all",
     statusFilter: "all",
@@ -140,6 +142,7 @@ export const useSkillStore = create<SkillState>()(
         const skills = await api.scanSkills(forceRefresh);
         set((state) => {
           state.skills = skills;
+          state.resourceErrors = {};
           if (state.selectedSkill) {
             state.selectedSkill =
               skills.find((skill) => skill.id === state.selectedSkill?.id) ??
@@ -192,6 +195,7 @@ export const useSkillStore = create<SkillState>()(
 
     applyScanResult: (skill: SkillMetadata) => {
       set((state) => {
+        delete state.resourceErrors[skill.id];
         const index = state.skills.findIndex((item) => item.id === skill.id);
         if (index !== -1) state.skills[index] = skill;
         if (state.selectedSkill?.id === skill.id) state.selectedSkill = skill;
@@ -241,6 +245,7 @@ export const useSkillStore = create<SkillState>()(
 
     updateSkill: async (skillId: string, force = false) => {
       set((state) => {
+        delete state.resourceErrors[skillId];
         const idx = state.skills.findIndex((s) => s.id === skillId);
         if (idx !== -1) {
           state.skills[idx].status = "updating";
@@ -277,6 +282,7 @@ export const useSkillStore = create<SkillState>()(
           state.error = requiresConfirmation
             ? `Aktualizacja wymaga decyzji: ${message}`
             : message;
+          state.resourceErrors[skillId] = state.error;
           if (requiresConfirmation) {
             const skill = state.skills.find((item) => item.id === skillId);
             state.pendingDirtyUpdate = {
@@ -309,6 +315,7 @@ export const useSkillStore = create<SkillState>()(
       try {
         const updated = await api.checkGitHubUpdate(skillId);
         set((state) => {
+          delete state.resourceErrors[skillId];
           const idx = state.skills.findIndex((s) => s.id === skillId);
           if (idx !== -1) {
             state.skills[idx] = updated;
@@ -320,12 +327,14 @@ export const useSkillStore = create<SkillState>()(
       } catch (err: unknown) {
         set((state) => {
           state.error = formatError(err, "GitHub check failed");
+          state.resourceErrors[skillId] = state.error;
         });
       }
     },
 
     checkoutCustomVersion: async (skillId: string, targetRef: string) => {
       set((state) => {
+        delete state.resourceErrors[skillId];
         const idx = state.skills.findIndex((s) => s.id === skillId);
         if (idx !== -1) {
           state.skills[idx].status = "updating";
@@ -350,6 +359,7 @@ export const useSkillStore = create<SkillState>()(
             state.skills[idx].status = "error";
           }
           state.error = formatError(err, "Checkout failed");
+          state.resourceErrors[skillId] = state.error;
         });
       }
     },
@@ -387,6 +397,7 @@ export const useSkillStore = create<SkillState>()(
             err,
             "Nie udało się zapisać gałęzi śledzenia",
           );
+          state.resourceErrors[skillId] = state.error;
         });
       }
     },
@@ -410,6 +421,7 @@ export const useSkillStore = create<SkillState>()(
         await get().fetchSkills(true);
         set((state) => {
           state.error = formatError(err, "Nie udało się usunąć skillu");
+          state.resourceErrors[skillId] = state.error;
         });
       } finally {
         set((state) => {
@@ -436,6 +448,7 @@ export const useSkillStore = create<SkillState>()(
             err,
             "Nie udało się zapisać repozytorium GitHub do śledzenia",
           );
+          state.resourceErrors[skillId] = state.error;
         });
       }
     },
@@ -460,6 +473,7 @@ export const useSkillStore = create<SkillState>()(
         const skill = outdated[i];
         set((state) => {
           state.batchProgress.currentItem = skill.name;
+          delete state.resourceErrors[skill.id];
         });
 
         try {
@@ -488,6 +502,7 @@ export const useSkillStore = create<SkillState>()(
               state.selectedSkill.updateAvailable = true;
             }
             state.error = message;
+            state.resourceErrors[skill.id] = message;
             if (
               message.includes(
                 "Katalog roboczy zawiera niezacommitowane zmiany",
@@ -518,6 +533,7 @@ export const useSkillStore = create<SkillState>()(
       } catch (err: unknown) {
         set((state) => {
           state.error = formatError(err, "Rollback failed");
+          state.resourceErrors[skillId] = state.error;
         });
       }
     },

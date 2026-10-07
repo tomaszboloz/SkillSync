@@ -81,13 +81,22 @@ impl ScanQueue {
 
 fn upstream_cache_key(skill: &SkillMetadata) -> String {
     format!(
-        "{}|{}|{}|{}|{:?}|{}",
+        "{}|{}|{}|{}|{:?}|{}|{}",
         skill.remote_url.as_deref().unwrap_or_default().trim(),
         skill.current_version,
         skill.branch_override.as_deref().unwrap_or_default().trim(),
         skill.branch_or_tag.as_deref().unwrap_or_default().trim(),
         skill.item_type,
-        skill.is_git_repo
+        skill.is_git_repo,
+        if skill.item_type == crate::models::skill::ManagedItemType::Plugin {
+            skill.path.to_str().unwrap_or_default()
+        } else if !skill.is_git_repo
+            && skill.item_type == crate::models::skill::ManagedItemType::Skill
+        {
+            skill.name.as_str()
+        } else {
+            ""
+        }
     )
 }
 
@@ -109,6 +118,9 @@ impl Default for ScanQueue {
 }
 
 pub(crate) async fn refresh_upstream(mut skill: SkillMetadata) -> SkillMetadata {
+    if let Some(owned) = super::claude_update_source::refresh(skill.clone()).await {
+        return owned;
+    }
     // A manually selected branch is an explicit opt-out from release tags.
     // Automatically detected branches must never have that effect: a
     // repository publishing SemVer tags is tracked by its newest tag.
@@ -192,7 +204,10 @@ pub(crate) async fn refresh_upstream(mut skill: SkillMetadata) -> SkillMetadata 
 
     if let Some(remote_url) = skill.remote_url.clone() {
         match GitHubService::check_latest_version(&remote_url).await {
-            Ok(Some(release)) => apply_github_release(&mut skill, &release),
+            Ok(Some(release)) => {
+                apply_github_release(&mut skill, &release);
+                skill = super::update_eligibility::verify(skill).await;
+            }
             Ok(None) => {
                 skill.status = SkillStatus::Error(
                     "Upstream nie udostępnia wersji ani tagu do porównania.".to_string(),
@@ -314,6 +329,61 @@ mod tests {
         let mut other_ref = second.clone();
         other_ref.branch_override = Some("main".to_string());
         assert_ne!(upstream_cache_key(&first), upstream_cache_key(&other_ref));
+    }
+
+    #[test]
+    fn raw_manifest_eligibility_cache_is_skill_specific() {
+        let mut first = fixture("a", "seo-audit", "/skills/a");
+        let mut second = fixture("b", "seo-page", "/skills/b");
+        first.is_git_repo = false;
+        second.is_git_repo = false;
+        assert_ne!(upstream_cache_key(&first), upstream_cache_key(&second));
+        second.name = first.name.clone();
+        assert_eq!(upstream_cache_key(&first), upstream_cache_key(&second));
+    }
+
+    #[test]
+    fn plugin_owner_channels_do_not_share_a_cached_git_tag() {
+        let mut first = fixture("a", "figma", "/claude/cache/figma");
+        let mut second = fixture("b", "figma", "/codex/cache/figma");
+        first.item_type = ManagedItemType::Plugin;
+        second.item_type = ManagedItemType::Plugin;
+        assert_ne!(upstream_cache_key(&first), upstream_cache_key(&second));
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit real-resource check; reads installations but never updates them"]
+    async fn verifies_real_reported_resources_without_mutation() {
+        let mut fastmcp = fixture("fastmcp", "fastmcp", "/unused");
+        fastmcp.is_git_repo = false;
+        fastmcp.remote_url = Some("https://github.com/PrefectHQ/fastmcp".into());
+        fastmcp.latest_version = Some("4.0.11".into());
+        fastmcp.update_available = true;
+        let result = super::super::update_eligibility::verify(fastmcp).await;
+        assert!(!result.update_available);
+        assert!(matches!(result.status, SkillStatus::Error(_)));
+        let mut seo = fixture("seo-audit", "seo-audit", "/unused");
+        seo.is_git_repo = false;
+        seo.remote_url = Some("https://github.com/AgriciDaniel/claude-seo".into());
+        seo.latest_version = Some("2.4.2".into());
+        seo.update_available = true;
+        assert!(
+            super::super::update_eligibility::verify(seo)
+                .await
+                .update_available
+        );
+        let path = dirs::home_dir()
+            .unwrap()
+            .join(".claude/plugins/cache/claude-plugins-official/figma/2.2.120");
+        let mut figma = fixture("figma", "figma", path.to_str().unwrap());
+        figma.item_type = ManagedItemType::Plugin;
+        figma.current_version = "2.2.120".into();
+        let result = super::super::claude_update_source::refresh(figma)
+            .await
+            .unwrap();
+        assert!(!result.update_available);
+        assert_eq!(result.latest_version.as_deref(), Some("2.2.120"));
+        assert_eq!(result.status, SkillStatus::UpToDate);
     }
 
     #[test]
